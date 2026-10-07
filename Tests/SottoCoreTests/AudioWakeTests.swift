@@ -27,7 +27,7 @@ final class AudioWakeTests: XCTestCase {
         let (outcome, elapsed) = await timed { await AudioWake.waitForInput(probe: tap.probe) }
         XCTAssertEqual(outcome, .audio)
         XCTAssertGreaterThanOrEqual(elapsed, .milliseconds(300))
-        XCTAssertLessThan(elapsed, .milliseconds(800))
+        XCTAssertLessThan(elapsed, AudioWake.cap, "returned on the audio, not at the cap")
     }
 
     func test_quietRoom_proceedsAfterGrace() async {
@@ -35,7 +35,7 @@ final class AudioWakeTests: XCTestCase {
         let (outcome, elapsed) = await timed { await AudioWake.waitForInput(probe: tap.probe) }
         XCTAssertEqual(outcome, .quiet)
         XCTAssertGreaterThanOrEqual(elapsed, AudioWake.quietGrace)
-        XCTAssertLessThan(elapsed, .milliseconds(600))
+        XCTAssertLessThan(elapsed, AudioWake.cap, "proceeded after the grace, not at the cap")
     }
 
     func test_digitalSilence_isStillTheRouteSwitching() async {
@@ -60,11 +60,11 @@ final class AudioWakeTests: XCTestCase {
         let (outcome, elapsed) = await timed { await AudioWake.waitForInput(probe: tap.probe) }
         XCTAssertEqual(outcome, .timedOut)
         XCTAssertGreaterThanOrEqual(elapsed, AudioWake.cap)
-        XCTAssertLessThan(elapsed, AudioWake.cap + .milliseconds(500))
+        XCTAssertLessThan(elapsed, AudioWake.cap + .seconds(1))
     }
 
     func test_stopWait_returnsOnFirstBuffer() async {
-        let tap = FakeTap(after: .milliseconds(100), rms: 0.01)
+        let tap = FakeTap(after: .milliseconds(30), rms: 0.01) // well inside stopGrace, so load can't push it past
         let start = ContinuousClock.now
         let got = await AudioWake.waitForBuffer { tap.probe().buffers > 0 }
         XCTAssertTrue(got)

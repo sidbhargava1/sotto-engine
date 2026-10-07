@@ -6,6 +6,10 @@ class SessionTestCase: XCTestCase {
     /// The host app the harness plays (DefaultInjectionPolicy: its own window frontmost is no move).
     class var hostBundleID: String { "com.example.host" }
 
+    /// Stall timers far beyond any fake's delay, so a slow runner can't turn a test's cleanup into
+    /// the raw fallback. Tests of the stall path pass their own config.
+    static let patientCoalescer = CoalescerConfig(flushInterval: .milliseconds(20), firstTokenTimeout: .seconds(5), stallTimeout: .seconds(5))
+
     struct Harness {
         let session: DictationSession
         let hotkey: FakeHotkeyMonitor
@@ -28,7 +32,7 @@ class SessionTestCase: XCTestCase {
         axOutcomes: [InjectionOutcome] = [],
         pasteOutcomes: [InjectionOutcome] = [],
         unicodeOutcomes: [InjectionOutcome] = [],
-        coalescerConfig: CoalescerConfig = CoalescerConfig(flushInterval: .milliseconds(20), firstTokenTimeout: .milliseconds(80), stallTimeout: .milliseconds(80)),
+        coalescerConfig: CoalescerConfig = SessionTestCase.patientCoalescer,
         clock: TestClock = TestClock(),
         idleSleepGrace: Duration = AudioIdleSleep.grace,
         maxRecordingDuration: Duration = .seconds(60),
@@ -100,4 +104,16 @@ class SessionTestCase: XCTestCase {
         await settle(h)
     }
 
+}
+
+/// Polls `condition` until it holds, failing after `timeout`. For progress a test can't await
+/// directly; the bound is a hang guard, never the expected latency.
+func waitUntil(_ what: String, timeout: Duration = .seconds(5), file: StaticString = #filePath, line: UInt = #line, _ condition: () async -> Bool) async {
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
+        if await condition() { return }
+        try? await Task.sleep(for: .milliseconds(1))
+    }
+    if await condition() { return }
+    XCTFail("timed out waiting for \(what)", file: file, line: line)
 }

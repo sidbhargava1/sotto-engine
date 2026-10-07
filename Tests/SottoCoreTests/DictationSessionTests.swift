@@ -20,20 +20,31 @@ final class DictationSessionTests: SessionTestCase {
     // MARK: DS-02 — recording B may start while A is still injecting; never interleaved
 
     func test_DS02_secondUtteranceNeverInterleavesWithFirstsInjection() async {
-        let backend = FixtureBackend(steps: [.init("A1 "), .init("A2 ", after: .milliseconds(30)), .init("A3", after: .milliseconds(30))])
+        // Driven by gates, not sleeps: A is provably mid-injection (one chunk typed, the rest held)
+        // when B is recorded and transcribed.
+        let backend = GatedBackend(tokens: ["A1 ", "A2 ", "A3"])
         let audio = FixtureAudioCapture(buffers: [AudioBuffer(samples: [0.1]), AudioBuffer(samples: [0.2])])
         let transcriber = FixtureTranscriber([.text("first"), .text("second")])
         let h = makeHarness(transcriber: transcriber, backend: backend, audio: audio)
 
         await h.session.start()
         await h.hotkey.press()
-        await h.hotkey.release() // utterance A starts cleaning/injecting slowly in the background
+        await h.hotkey.release()
+        await backend.open() // A's first token only
+        await waitUntil("A's first chunk") { await h.ax.injectedText() == "A1 " }
 
-        try? await Task.sleep(for: .milliseconds(10)) // A is mid-injection, not yet done
         await h.hotkey.press() // B's recording starts while A is still injecting (DS-02)
         await h.hotkey.release()
-        await settle(h)
+        await waitUntil("B's transcription") { transcriber.events.snapshot().filter { $0 == "transcribe" }.count == 2 }
+        // Room for a broken lock to let B through; the assertions hold however long this takes.
+        try? await Task.sleep(for: .milliseconds(20))
+        let cleanups = await backend.calls
+        XCTAssertEqual(cleanups, 1, "B's cleanup waits for A's delivery")
+        let typedSoFar = await h.ax.injectedText()
+        XCTAssertEqual(typedSoFar, "A1 ", "nothing of B's lands while A holds the target")
 
+        await backend.openAll()
+        await settle(h)
         let injected = await h.ax.injectedText()
         XCTAssertEqual(injected, "A1 A2 A3A1 A2 A3", "A's chunks then B's, never interleaved: \(injected)")
     }
@@ -260,7 +271,7 @@ final class DictationSessionTests: SessionTestCase {
         )
         await cappedSession.start()
         await h.hotkey.press()
-        try? await Task.sleep(for: .milliseconds(80)) // cap fires before we ever release
+        await waitUntil("the cap's stop") { await h.audio.calls.contains("stop") } // cap fires before we ever release
         await h.hotkey.release() // physically-late release must be a no-op, not a double-process
         await cappedSession.drain(handled: await h.hotkey.yielded)
         let injected = await h.ax.injectedText()
@@ -571,12 +582,14 @@ final class DictationSessionTests: SessionTestCase {
     // MARK: FT-04 — long total time with all per-token gaps small must NOT false-trigger stall
 
     func test_FT04_longTotalTimeWithSmallGapsDoesNotFalseStall() async {
-        let steps = (1...6).map { FixtureBackend.Step("w\($0) ", after: .milliseconds(15)) }
+        // Production timeouts. Total (>=1.2s) always exceeds the 1s stall timeout; each 100ms gap
+        // has 10x headroom under it, so a loaded runner's late timers can't fake a stall.
+        let steps = (1...12).map { FixtureBackend.Step("w\($0) ", after: .milliseconds(100)) }
         let backend = FixtureBackend(steps: steps)
-        let h = makeHarness(backend: backend, coalescerConfig: CoalescerConfig(flushInterval: .milliseconds(20), firstTokenTimeout: .milliseconds(100), stallTimeout: .milliseconds(100)))
+        let h = makeHarness(backend: backend, coalescerConfig: CoalescerConfig(flushInterval: .milliseconds(20)))
         await runUtterance(h)
         let injected = await h.ax.injectedText()
-        for i in 1...6 { XCTAssertTrue(injected.contains("w\(i)")) }
+        XCTAssertEqual(injected, (1...12).map { "w\($0) " }.joined(), "no stall, no raw fallback")
     }
 
     // MARK: FT-05 — STT throws mid-transcribe on a long buffer -> error, no partial injection

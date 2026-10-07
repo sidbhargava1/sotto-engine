@@ -11,17 +11,17 @@ final class IdleSleepTests: SessionTestCase {
         await runUtterance(h)
         var calls = await h.audio.calls
         XCTAssertEqual(calls, ["start", "stop"], "must stay warm during the grace period")
-        try? await Task.sleep(for: grace * 3)
+        await waitUntil("idle sleep") { await h.audio.calls.contains("sleep") }
         calls = await h.audio.calls
         XCTAssertEqual(calls, ["start", "stop", "sleep"])
     }
 
     func test_pressWithinGrace_cancelsSleep() async {
-        let h = makeHarness(idleSleepGrace: .milliseconds(200))
+        let h = makeHarness(idleSleepGrace: .milliseconds(500)) // wide enough that the press lands inside it under load
         await runUtterance(h)
         await h.hotkey.press()
         await settle(h)
-        try? await Task.sleep(for: .milliseconds(400))
+        try? await Task.sleep(for: .milliseconds(800))
         let calls = await h.audio.calls
         XCTAssertEqual(calls, ["start", "stop", "start"], "a held key must never be slept under")
     }
@@ -29,7 +29,7 @@ final class IdleSleepTests: SessionTestCase {
     func test_pressAfterSleep_wakesThenRecords() async {
         let h = makeHarness(idleSleepGrace: grace)
         await runUtterance(h)
-        try? await Task.sleep(for: grace * 3)
+        await waitUntil("idle sleep") { await h.audio.calls.contains("sleep") }
         await h.hotkey.press()
         await h.hotkey.release()
         await settle(h)
@@ -57,7 +57,7 @@ final class IdleSleepTests: SessionTestCase {
     func test_idleSleepNeverTouchesPause() async {
         let h = makeHarness(idleSleepGrace: grace)
         await runUtterance(h)
-        try? await Task.sleep(for: grace * 3)
+        await waitUntil("idle sleep") { await h.audio.calls.contains("sleep") }
         let paused = await h.settings.load().paused
         XCTAssertFalse(paused, "auto-sleep is not the user-facing Pause toggle")
     }
@@ -86,7 +86,7 @@ final class IdleSleepTests: SessionTestCase {
         await runUtterance(h)
         await h.audio.setTransport(.builtIn)
         await h.session.scheduleIdleSleep() // what the app does on a device change
-        try? await Task.sleep(for: grace * 3)
+        await waitUntil("idle sleep") { await h.audio.calls.contains("sleep") }
         let calls = await h.audio.calls
         XCTAssertEqual(calls, ["start", "stop", "sleep"])
     }

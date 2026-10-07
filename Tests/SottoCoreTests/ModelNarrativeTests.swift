@@ -33,14 +33,15 @@ final class ModelNarrativeTests: XCTestCase {
         let engine = StubEngine(tokenDelay: 0.005)
         engine.endless = true
         let (backend, dictationPrefill) = try await loaded(engine)
+        let beforeDecode = engine.entries().count
         let narrative = Task { await collectStream(backend.generate(system: "sys", user: "stats", maxTokens: 4_000)) }
-        try await Task.sleep(for: .milliseconds(40))
+        await waitUntil("the decode to start") { engine.entries().dropFirst(beforeDecode).contains("sample") }
         let pressed = ContinuousClock.now
         backend.preempt()  // what the app does on press, then it queues prepare
         await backend.prepare(dictionary: [])
         let result = await narrative.value
         XCTAssertEqual(result.error as? CleanupError, .superseded)
-        XCTAssertLessThan(ContinuousClock.now - pressed, .milliseconds(200))
+        XCTAssertLessThan(ContinuousClock.now - pressed, .milliseconds(500), "a hang guard: undisturbed, the decode never ends")
         let afterPress = engine.entries().count
         engine.endless = false
         let cleanup = await collectStream(backend.clean(request()))
@@ -59,8 +60,9 @@ final class ModelNarrativeTests: XCTestCase {
         let engine = StubEngine(tokenDelay: 0.005)
         engine.endless = true
         let (backend, dictationPrefill) = try await loaded(engine)
+        let beforeDecode = engine.entries().count
         let narrative = Task { await collectStream(backend.generate(system: "sys", user: "stats", maxTokens: 4_000)) }
-        try await Task.sleep(for: .milliseconds(30))
+        await waitUntil("the decode to start") { engine.entries().dropFirst(beforeDecode).contains("sample") }
         engine.endless = false
         let mark = engine.entries().count
         let cleanup = await collectStream(backend.clean(request()))  // a cleanup request alone supersedes it
@@ -76,8 +78,9 @@ final class ModelNarrativeTests: XCTestCase {
         let engine = StubEngine(tokenDelay: 0.003)
         engine.endless = true
         let (backend, _) = try await loaded(engine)
+        let beforeDecode = engine.entries().count
         let narrative = Task { await collectStream(backend.generate(system: "sys", user: "stats", maxTokens: 4_000)) }
-        try await Task.sleep(for: .milliseconds(20))
+        await waitUntil("the decode to start") { engine.entries().dropFirst(beforeDecode).contains("sample") }
         for _ in 0..<3 {
             backend.preempt()
             await backend.prepare(dictionary: [])
@@ -93,8 +96,9 @@ final class ModelNarrativeTests: XCTestCase {
         let engine = StubEngine(tokenDelay: 0.003)
         engine.endless = true
         let (backend, dictationPrefill) = try await loaded(engine)
+        let beforeDecode = engine.entries().count
         let narrative = Task { await collectStream(backend.generate(system: "sys", user: "stats", maxTokens: 4_000)) }
-        try await Task.sleep(for: .milliseconds(30))
+        await waitUntil("the decode to start") { engine.entries().dropFirst(beforeDecode).contains("sample") }
         narrative.cancel()
         _ = await narrative.value
         await backend.prepare(dictionary: [])  // a later queue hop: the restore has already run
