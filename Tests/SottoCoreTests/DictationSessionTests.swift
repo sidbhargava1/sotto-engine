@@ -26,6 +26,10 @@ final class DictationSessionTests: SessionTestCase {
         let audio = FixtureAudioCapture(buffers: [AudioBuffer(samples: [0.1]), AudioBuffer(samples: [0.2])])
         let transcriber = FixtureTranscriber([.text("first"), .text("second")])
         let h = makeHarness(transcriber: transcriber, backend: backend, audio: audio)
+        // Yielded right before the press-app probe and injectionLock: B's arrival at the lock.
+        let raw = RawLog()
+        let rawStream = await h.session.rawTranscriptUpdates()
+        Task { for await text in rawStream { raw.append(text) } }
 
         await h.session.start()
         await h.hotkey.press()
@@ -35,8 +39,9 @@ final class DictationSessionTests: SessionTestCase {
 
         await h.hotkey.press() // B's recording starts while A is still injecting (DS-02)
         await h.hotkey.release()
-        await waitUntil("B's transcription") { transcriber.events.snapshot().filter { $0 == "transcribe" }.count == 2 }
-        // Room for a broken lock to let B through; the assertions hold however long this takes.
+        await waitUntil("B at the injection lock") { raw.snapshot().contains("second") }
+        // Room for a broken lock to let B through (it's past STT, only the probe and lock remain);
+        // with the lock, the assertions hold however long this takes.
         try? await Task.sleep(for: .milliseconds(20))
         let cleanups = await backend.calls
         XCTAssertEqual(cleanups, 1, "B's cleanup waits for A's delivery")

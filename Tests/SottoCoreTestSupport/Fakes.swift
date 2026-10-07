@@ -235,7 +235,7 @@ actor FixtureBackend: CleanupBackend {
 actor GatedBackend: CleanupBackend {
     private let tokens: [String]
     private var permits = 0
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var waiters: [(id: UUID, continuation: CheckedContinuation<Void, Never>)] = []
     private(set) var calls = 0
 
     init(tokens: [String]) { self.tokens = tokens }
@@ -245,16 +245,30 @@ actor GatedBackend: CleanupBackend {
         permits += count
         while permits > 0, !waiters.isEmpty {
             permits -= 1
-            waiters.removeFirst().resume()
+            waiters.removeFirst().continuation.resume()
         }
     }
 
     /// Lets everything through from now on.
     func openAll() { open(Int.max / 2) }
 
+    /// Cancellation (the consumer dropped the stream) releases the wait, so a gate the test never
+    /// opens can't strand the task.
     private func next() async {
         if permits > 0 { permits -= 1; return }
-        await withCheckedContinuation { waiters.append($0) }
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled { continuation.resume() } else { waiters.append((id, continuation)) }
+            }
+        } onCancel: {
+            Task { await self.release(id) }
+        }
+    }
+
+    private func release(_ id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        waiters.remove(at: index).continuation.resume()
     }
 
     private func begin() -> [String] { calls += 1; return tokens }

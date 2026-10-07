@@ -7,7 +7,7 @@ final class IdleSleepTests: SessionTestCase {
     private let grace: Duration = .milliseconds(60)
 
     func test_releaseThenIdle_sleepsAfterGrace() async {
-        let h = makeHarness(idleSleepGrace: grace)
+        let h = makeHarness(idleSleepGrace: .milliseconds(500)) // long enough that "still warm" holds under load
         await runUtterance(h)
         var calls = await h.audio.calls
         XCTAssertEqual(calls, ["start", "stop"], "must stay warm during the grace period")
@@ -43,7 +43,7 @@ final class IdleSleepTests: SessionTestCase {
         let h = makeHarness(idleSleepGrace: grace)
         await h.audio.holdNextSleep()
         await runUtterance(h)
-        while await !h.audio.calls.contains("sleep") { try? await Task.sleep(for: .milliseconds(5)) }
+        await waitUntil("idle sleep") { await h.audio.calls.contains("sleep") }
         await h.hotkey.press()
         try? await Task.sleep(for: .milliseconds(50))
         var calls = await h.audio.calls

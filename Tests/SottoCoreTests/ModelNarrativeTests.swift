@@ -36,11 +36,15 @@ final class ModelNarrativeTests: XCTestCase {
         let beforeDecode = engine.entries().count
         let narrative = Task { await collectStream(backend.generate(system: "sys", user: "stats", maxTokens: 4_000)) }
         await waitUntil("the decode to start") { engine.entries().dropFirst(beforeDecode).contains("sample") }
+        let samples = { engine.entries().filter { $0 == "sample" }.count }
         let pressed = ContinuousClock.now
         backend.preempt()  // what the app does on press, then it queues prepare
+        let samplesAtPress = samples()
         await backend.prepare(dictionary: [])
         let result = await narrative.value
         XCTAssertEqual(result.error as? CleanupError, .superseded)
+        // "Within a token" counted in tokens, not wall time: the one in flight, plus one for the race.
+        XCTAssertLessThanOrEqual(samples() - samplesAtPress, 2, "the decode ran on after the press")
         XCTAssertLessThan(ContinuousClock.now - pressed, .milliseconds(500), "a hang guard: undisturbed, the decode never ends")
         let afterPress = engine.entries().count
         engine.endless = false
