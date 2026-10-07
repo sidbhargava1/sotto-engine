@@ -1,0 +1,53 @@
+## Parakeet TDT v2 re-run on the growing buffer every 0.4s, over the two synthetic (TTS) fixtures
+
+### fixture_15s_a batch: Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sit and Klaus on the email so they have full visibility into the release timeline and can flag any blockers early before we actually ship it out to everyone on Friday.
+0.4s 39ms cpu 11ms | Okay.
+0.8s 38ms cpu 13ms | Okay so said
+1.2s 38ms cpu 13ms | Okay so send it to
+1.6s 40ms cpu 14ms | Okay so send a Tuesday note.
+2.0s 41ms cpu 14ms | Okay so send it Tuesday no wait
+2.4s 43ms cpu 17ms | Okay so send it Tuesday no wait Wednesday.
+2.8s 41ms cpu 17ms | Okay so send it Tuesday no wait Wednesday to the whole
+3.2s 43ms cpu 19ms | Okay so send it Tuesday no wait Wednesday to the whole team.
+3.6s 44ms cpu 21ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure that you're going to
+4.0s 45ms cpu 21ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see it.
+4.4s 45ms cpu 21ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you CC.
+4.8s 45ms cpu 22ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you CC sit and
+5.2s 47ms cpu 24ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sid and Klaus on
+5.6s 48ms cpu 25ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sit and Klaus on the email.
+6.0s 53ms cpu 24ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sid and Klaus on the email so
+6.4s 51ms cpu 24ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sid and Klaus on the email so they have
+6.8s 51ms cpu 26ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sid and Klaus on the email so they have full visibility.
+7.2s 49ms cpu 27ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sid and Klaus on the email so they have full visibility.
+7.6s 49ms cpu 27ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sid and Klaus on the email so they have full visibility into the
+8.0s 50ms cpu 28ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sid and Klaus on the email so they have full visibility into the release.
+8.4s 51ms cpu 29ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sid and Klaus on the email so they have full visibility into the release timeline.
+8.8s 52ms cpu 30ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sit and Klaus on the email so they have full visibility into the release timeline and can.
+9.2s 52ms cpu 30ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sid and Klaus on the email so they have full visibility into the release timeline and can flag.
+9.6s 52ms cpu 30ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sid and Klaus on the email so they have full visibility into the release timeline and can flag any block.
+10.0s 53ms cpu 31ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sit and Klaus on the email so they have full visibility into the release timeline and can flag any blockers or
+10.4s 54ms cpu 32ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sit and Klaus on the email so they have full visibility into the release timeline and can flag any blockers early before.
+10.8s 54ms cpu 32ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sit and Klaus on the email so they have full visibility into the release timeline and can flag any blockers early before we
+11.2s 54ms cpu 33ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sit and Klaus on the email so they have full visibility into the release timeline and can flag any blockers early before we actually
+11.6s 56ms cpu 35ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sit and Klaus on the email so they have full visibility into the release timeline and can flag any blockers early before we actually ship it.
+12.0s 57ms cpu 36ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sit and Klaus on the email so they have full visibility into the release timeline and can flag any blockers early before we actually ship it out to
+12.4s 57ms cpu 36ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sit and Klaus on the email so they have full visibility into the release timeline and can flag any blockers early before we actually ship it out to everyone.
+12.8s 57ms cpu 36ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sit and Klaus on the email so they have full visibility into the release timeline and can flag any blockers early before we actually ship it out to everyone on.
+13.2s 58ms cpu 37ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sit and Klaus on the email so they have full visibility into the release timeline and can flag any blockers early before we actually ship it out to everyone on.
+13.6s 58ms cpu 37ms | Okay so send it Tuesday no wait Wednesday to the whole team and make sure you see C Sit and Klaus on the email so they have full visibility into the release timeline and can flag any blockers early before we actually ship it out to everyone on Friday.
+
+| fixture_5s_a | 4.8 | 0.00 | 42 | 0.44 / 0.84 | 37/42/n/a/n/a/n/a | 19/n/a/n/a | 96.5 / 97.3 | 0.30 | 0 / 0 | 17 | 3.7 |
+
+### fixture_5s_a batch: Um can you send that file over to me before lunch today please because I need it for the call.
+0.4s 36ms cpu 12ms | Okay.
+0.8s 37ms cpu 13ms | Um can you send
+1.2s 38ms cpu 13ms | Um can you send that fire?
+1.6s 38ms cpu 14ms | Um can you send that file over to
+2.0s 39ms cpu 15ms | Um can you send that file over to me but
+2.4s 40ms cpu 16ms | Um can you send that file over to me before long?
+2.8s 40ms cpu 16ms | Um can you send that file over to me before lunch today?
+3.2s 41ms cpu 17ms | Um can you send that file over to me before lunch today please?
+3.6s 41ms cpu 17ms | Um can you send that file over to me before lunch today please because
+4.0s 42ms cpu 18ms | Um can you send that file over to me before lunch today please because I need it.
+4.4s 42ms cpu 18ms | Um can you send that file over to me before lunch today please because I need it for
+4.8s 42ms cpu 19ms | Um can you send that file over to me before lunch today please because I need it for the call.

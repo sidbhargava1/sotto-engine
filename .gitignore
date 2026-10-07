@@ -1,0 +1,12 @@
+# Also the published engine's root .gitignore (scripts/engine-export.sh).
+.build/
+.swiftpm/
+/build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.profraw
+.DS_Store
+# llama.cpp, built by scripts/build-llama.sh and zipped by scripts/package-llama.sh (no slash: may be a symlink)
+/Vendor
+*.xcframework.zip

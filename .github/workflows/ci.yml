@@ -1,0 +1,41 @@
+# Build and test on every push and pull request to main. One job, to keep macOS minutes down;
+# what it can't check (recognition quality, the mic, injection) is listed in CONTRIBUTING.md.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: macos-15  # the minimum macOS the engine supports
+    timeout-minutes: 30
+    env:
+      # macos-15 defaults to Xcode 16.4; SpeechAnalyzer needs the macOS 26 SDK. 26.3 is the
+      # Xcode the engine is developed on (runner-images macos-15-arm64 lists 26.0.1-26.3).
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+      - run: xcodebuild -version && swift --version
+      # No Vendor/ here, so `llama` is the release asset, fetched and checksummed by SwiftPM.
+      - uses: actions/cache@v6
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ runner.arch }}-xcode26.3-${{ hashFiles('Package.resolved', 'Package.swift') }}
+          restore-keys: spm-${{ runner.os }}-${{ runner.arch }}-xcode26.3-
+      - run: swift build
+      # SottoCore (pure, fakes), SottoEngine adapters, and the CLI. No weights, devices or permissions.
+      - run: swift test
+      - run: swift build -c release --product sotto
+      # The release binary, run in place: proves llama.framework loads from beside it (README).
+      - run: .build/release/sotto --help
