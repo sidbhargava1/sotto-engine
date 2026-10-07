@@ -251,9 +251,13 @@ final class PartialsSessionTests: SessionTestCase {
     // MARK: release budget
 
     /// RESULTS.md "Frame budget": with a partial holding the (fake) ANE at release, release→sttDone
-    /// stays within 10 ms of the no-partials baseline because the partial is cancelled first.
-    func test_releaseWithPartialInFlight_staysWithinBudget() async {
-        func releaseToSTT(partials: Bool) async -> Duration {
+    /// stays near the no-partials baseline because the partial is cancelled first. The regression
+    /// (partial not cancelled) holds the ANE ~300 ms longer, several times the ~40 ms baseline, so
+    /// the always-on bound is relative (≤ 1.5× baseline): it scales with a slow shared runner, where
+    /// an absolute 10 ms failed on scheduling noise (0.092 s vs 0.073 s). The 10 ms budget itself is
+    /// still checked off CI.
+    func test_releaseWithPartialInFlight_staysWithinBudget() async throws {
+        func releaseToSTT(partials: Bool) async throws -> Duration {
             let events = EventLog<String>()
             let audio = FixtureAudioCapture(events: events)
             let engine = FakeANETranscriber(events: events)
@@ -276,15 +280,21 @@ final class PartialsSessionTests: SessionTestCase {
             }
             await h.hotkey.release()
             await session.drain(handled: 2)
-            return timings.snapshot().first?.stt ?? .seconds(10)
+            return try XCTUnwrap(timings.snapshot().first?.stt, "no timing reported")
         }
+        _ = try await releaseToSTT(partials: false) // warm-up: first-run costs land in neither series
+        _ = try await releaseToSTT(partials: true)
         var baseline: [Duration] = [], withPartial: [Duration] = []
-        for _ in 0..<5 {
-            baseline.append(await releaseToSTT(partials: false))
-            withPartial.append(await releaseToSTT(partials: true))
+        for _ in 0..<7 { // interleaved, so a burst of load hits both series
+            baseline.append(try await releaseToSTT(partials: false))
+            withPartial.append(try await releaseToSTT(partials: true))
         }
-        let base = baseline.sorted()[2], partial = withPartial.sorted()[2]
-        XCTAssertLessThan(partial - base, .milliseconds(10), "median release→sttDone \(partial) vs baseline \(base)")
+        let base = baseline.sorted()[3], partial = withPartial.sorted()[3]
+        let detail = "median release→sttDone \(partial) vs baseline \(base)"
+        XCTAssertLessThanOrEqual(partial, base * 1.5, detail)
+        if ProcessInfo.processInfo.environment["CI"] == nil {
+            XCTAssertLessThan(partial - base, .milliseconds(10), detail)
+        }
     }
 }
 

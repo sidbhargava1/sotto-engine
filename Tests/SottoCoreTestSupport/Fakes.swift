@@ -230,6 +230,64 @@ actor FixtureBackend: CleanupBackend {
     private func noteCancelled() { cancellations += 1 }
 }
 
+/// Cleanup whose tokens come out only as the test calls `open(_:)`: ordering tests step the
+/// decode by hand instead of racing sleeps against the coalescer's timers.
+actor GatedBackend: CleanupBackend {
+    private let tokens: [String]
+    private var permits = 0
+    private var waiters: [(id: UUID, continuation: CheckedContinuation<Void, Never>)] = []
+    private(set) var calls = 0
+
+    init(tokens: [String]) { self.tokens = tokens }
+
+    /// Lets `count` more tokens through, across every request in call order.
+    func open(_ count: Int = 1) {
+        permits += count
+        while permits > 0, !waiters.isEmpty {
+            permits -= 1
+            waiters.removeFirst().continuation.resume()
+        }
+    }
+
+    /// Lets everything through from now on.
+    func openAll() { open(Int.max / 2) }
+
+    /// Cancellation (the consumer dropped the stream) releases the wait, so a gate the test never
+    /// opens can't strand the task.
+    private func next() async {
+        if permits > 0 { permits -= 1; return }
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled { continuation.resume() } else { waiters.append((id, continuation)) }
+            }
+        } onCancel: {
+            Task { await self.release(id) }
+        }
+    }
+
+    private func release(_ id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        waiters.remove(at: index).continuation.resume()
+    }
+
+    private func begin() -> [String] { calls += 1; return tokens }
+
+    nonisolated func clean(_ request: CleanupRequest) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                for token in await self.begin() {
+                    await self.next()
+                    if Task.isCancelled { return }
+                    continuation.yield(token)
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
+
 actor RecordingInjector: TextInjecting {
     struct Call: Equatable { let text: String; let context: TargetContext }
     private(set) var calls: [Call] = []
@@ -319,6 +377,9 @@ final class StateLog: @unchecked Sendable {
 
     func settled() async -> [SessionState] {
         try? await Task.sleep(for: .milliseconds(50))
+        // A loaded machine (CI) can leave the listener behind; every utterance ends in .idle.
+        let deadline = ContinuousClock.now + .seconds(2)
+        while snapshot().last != .idle, ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(5)) }
         return snapshot()
     }
 }

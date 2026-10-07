@@ -96,7 +96,7 @@ final class CleanupWiringTests: SessionTestCase {
         let backend = FixtureBackend(steps: [.init("late", after: .seconds(5))])
         let h = makeHarness(backend: backend, coalescerConfig: CoalescerConfig(flushInterval: .milliseconds(20), firstTokenTimeout: .milliseconds(60), stallTimeout: .milliseconds(60)))
         await runUtterance(h)
-        try? await Task.sleep(for: .milliseconds(50))
+        await waitUntil("the backend's cancellation") { await backend.cancellations > 0 }
         let cancellations = await backend.cancellations
         XCTAssertEqual(cancellations, 1)
         let injected = await h.ax.injectedText()
@@ -139,7 +139,7 @@ final class CleanupWiringTests: SessionTestCase {
             injectors: InjectorChain(ax: ax, paste: RecordingInjector(), unicode: RecordingInjector()),
             contextProvider: FakeContextProvider(makeTestContext()), dictionaryStore: InMemoryDictionaryStore(),
             settingsStore: InMemorySettings(), clipboard: FakeClipboard(), undo: FakeUndo(),
-            coalescerConfig: CoalescerConfig(flushInterval: .milliseconds(20), firstTokenTimeout: .milliseconds(200), stallTimeout: .milliseconds(200)),
+            coalescerConfig: SessionTestCase.patientCoalescer,
             onTiming: { reports.append($0) }
         )
         await session.start()

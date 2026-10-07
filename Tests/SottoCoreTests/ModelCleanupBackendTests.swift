@@ -29,9 +29,10 @@ final class ModelCleanupBackendTests: XCTestCase {
     func test_LB02_newRequestSupersedesAnInFlightDecode() async throws {
         let engine = StubEngine(pieces: Array(repeating: "a", count: 50), tokenDelay: 0.005)
         let backend = try await loaded(engine)
+        let beforeDecode = engine.entries().count
         let first = backend.clean(Self.request())
         let firstResult = Task { await collectStream(first) }
-        try await Task.sleep(for: .milliseconds(40))
+        await waitUntil("the decode to start") { engine.entries().dropFirst(beforeDecode).contains("sample") }
         engine.pieces = ["B"]
         let (second, secondError) = await Self.collect(backend.clean(Self.request()))
         let firstError = await firstResult.value.error
@@ -73,11 +74,15 @@ final class ModelCleanupBackendTests: XCTestCase {
         _ = try await iterator.next()
         stream = nil
         _ = consume iterator
-        try await Task.sleep(for: .milliseconds(60))
-        let samplesThen = engine.entries().filter { $0 == "sample" }.count
-        try await Task.sleep(for: .milliseconds(60))
-        let samplesNow = engine.entries().filter { $0 == "sample" }.count
-        XCTAssertEqual(samplesThen, samplesNow)
+        // Wait for sampling to go quiet (a slow runner propagates the cancel late), then check it
+        // stopped early: run to the end, it would reach all 200.
+        var samplesNow = -1
+        await waitUntil("sampling to stop") {
+            let then = engine.entries().filter { $0 == "sample" }.count
+            try? await Task.sleep(for: .milliseconds(60))
+            samplesNow = engine.entries().filter { $0 == "sample" }.count
+            return then == samplesNow
+        }
         XCTAssertLessThan(samplesNow, 200)
     }
 
@@ -107,7 +112,7 @@ final class ModelCleanupBackendTests: XCTestCase {
         let start = ContinuousClock.now
         let (_, error) = await Self.collect(backend.clean(Self.request()))
         XCTAssertEqual(error as? CleanupError, .notReady)
-        XCTAssertLessThan(ContinuousClock.now - start, .milliseconds(100))
+        XCTAssertLessThan(ContinuousClock.now - start, .milliseconds(500), "well under the 1.5 s first-token wait")
     }
 
     func test_WR06_requestDuringRebuildWaitsAndUsesTheNewPrefix() async throws {
@@ -127,8 +132,9 @@ final class ModelCleanupBackendTests: XCTestCase {
         let engine = StubEngine(pieces: Array(repeating: "a", count: 20), tokenDelay: 0.003)
         let backend = try await loaded(engine)
         let req = Self.request()
+        let beforeDecode = engine.entries().count
         let decode = Task { await collectStream(backend.clean(req)) }
-        try await Task.sleep(for: .milliseconds(15))
+        await waitUntil("the decode to start") { engine.entries().dropFirst(beforeDecode).contains("sample") }
         await backend.prepare(dictionary: ["Klaus"])
         _ = await decode.value
         let log = engine.entries()
@@ -150,12 +156,13 @@ final class ModelCleanupBackendTests: XCTestCase {
         let engine = StubEngine(pieces: Array(repeating: "a", count: 2000), tokenDelay: 0.01)
         let backend = try await loaded(engine)
         let req = Self.request()
+        let beforeDecode = engine.entries().count
         let decode = Task { await collectStream(backend.clean(req)) }
-        try await Task.sleep(for: .milliseconds(50))
+        await waitUntil("the decode to start") { engine.entries().dropFirst(beforeDecode).contains("sample") }
         let start = ContinuousClock.now
         backend.beginShutdown()
         await backend.shutdown()
-        XCTAssertLessThan(ContinuousClock.now - start, .milliseconds(200), "shutdown waited out the decode")
+        XCTAssertLessThan(ContinuousClock.now - start, .seconds(1), "shutdown waited out the 20 s decode")
         XCTAssertEqual(engine.entries().last, "unload")
         let result = await decode.value
         XCTAssertEqual(result.error as? CleanupError, .superseded)

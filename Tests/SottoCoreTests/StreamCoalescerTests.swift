@@ -67,7 +67,7 @@ final class StreamCoalescerTests: XCTestCase {
 
     func test_CO04_throwAfterPartialFlushKeepsPriorChunks() async {
         let source = makeStream([("one ", .zero), ("two ", .milliseconds(5))], fail: FakeError(label: "backend-died"))
-        let config = CoalescerConfig(flushInterval: .milliseconds(20), firstTokenTimeout: .milliseconds(200), stallTimeout: .milliseconds(200))
+        let config = CoalescerConfig(flushInterval: .milliseconds(20), firstTokenTimeout: .seconds(5), stallTimeout: .seconds(5))
         let (events, error) = await collect(StreamCoalescer.coalesce(source, config: config))
         XCTAssertNotNil(error)
         let chunks = events.compactMap { if case .chunk(let t) = $0 { return t } else { return nil } }
@@ -89,7 +89,7 @@ final class StreamCoalescerTests: XCTestCase {
 
     func test_CO06_newCoalescerInstanceStartsClean() async {
         let first = makeStream([("stale", .zero)])
-        let config = CoalescerConfig(flushInterval: .milliseconds(10), firstTokenTimeout: .milliseconds(50), stallTimeout: .milliseconds(50))
+        let config = CoalescerConfig(flushInterval: .milliseconds(10), firstTokenTimeout: .seconds(5), stallTimeout: .seconds(5))
         _ = await collect(StreamCoalescer.coalesce(first, config: config))
 
         let second = makeStream([("fresh", .zero)])
