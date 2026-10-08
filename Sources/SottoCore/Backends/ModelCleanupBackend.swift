@@ -39,6 +39,7 @@ public actor ModelCleanupBackend: CleanupBackend {
     private var stagingTarget: String?
     private var stagingTask: Task<Void, Never>?
     private var stagingGeneration = 0
+    /// Cells the staged build will occupy once finished (0 when none): a request must leave room for all of them.
     private var stagedCells = 0
     /// Tokens per staged decode. A request that arrives mid-build waits for at most one batch.
     static let stagingBatch = 64
@@ -289,6 +290,8 @@ public actor ModelCleanupBackend: CleanupBackend {
     private func stage(_ prefix: String) -> Task<Void, Never>? {
         guard engine.supportsStagedPrefix, cachedPrefix != nil else { return nil }
         if stagingTarget == prefix, let task = stagingTask { return task }
+        // A request whose dictionary matches neither the live prefix nor the build in progress
+        // supersedes that build: the newest dictionary wins, and the older build's work is dropped.
         cancelStaging()
         guard let tokens = try? engine.tokenize(ChatML.prefix(prefix)) else { return nil }
         var shared = 0
@@ -303,7 +306,7 @@ public actor ModelCleanupBackend: CleanupBackend {
         stagingGeneration += 1
         let generation = stagingGeneration
         stagingTarget = prefix
-        stagedCells = 0
+        stagedCells = tokens.count - shared  // the whole build's cells, claimed from the start (not batches done so far)
         let task = Task { await self.runStaging(prefix, tokens, shared: shared, generation: generation) }
         stagingTask = task
         return task
@@ -319,7 +322,6 @@ public actor ModelCleanupBackend: CleanupBackend {
                 guard generation == stagingGeneration, isReady else { return }
                 let end = min(position + Self.stagingBatch, tokens.count)
                 try engine.stagePrefill(Array(tokens[position..<end]), at: position)
-                stagedCells += end - position
                 position = end
                 await Task.yield()
             }
