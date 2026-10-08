@@ -21,6 +21,12 @@ public struct Delivery: Sendable, Equatable {
     public var landedText: String
     public var strategy: DeliveryKind
     public var degraded: DegradedReason?
+    // Landing facts for `LastLanding`; internal, since History rows don't carry them.
+    var writes = 0
+    var verified = false  // every write was an AX `.success`
+    var start: FieldRange?  // the selection before the first write, when it was read
+    var fieldCount: Int?  // set when the replace already read it
+    var noWrite = false  // replace found the text unchanged: nothing landed, nothing to record
 }
 
 /// One completed utterance, handed to the `HistoryRecording` hook (shaped as SPEC §15.2's

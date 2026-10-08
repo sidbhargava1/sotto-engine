@@ -5,7 +5,7 @@ import Foundation
 final class UtteranceClock: @unchecked Sendable {
     private let lock = NSLock()
     private let releasedAt: ContinuousClock.Instant
-    private let pressedAt: ContinuousClock.Instant
+    let pressedAt: ContinuousClock.Instant
     /// Wall clock at hotkey down: the row's `started_at` (SPEC §15.2).
     let startedAt: Date
     private var _sttDone: ContinuousClock.Instant?

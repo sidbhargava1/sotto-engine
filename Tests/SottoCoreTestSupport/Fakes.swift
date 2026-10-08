@@ -18,6 +18,7 @@ actor FakeHotkeyMonitor: HotkeyMonitoring {
 
     nonisolated func events() -> AsyncStream<HotkeyEvent> { stream }
     func press() { yielded += 1; continuation.yield(.pressed) }
+    func pressReplacingLast() { yielded += 1; continuation.yield(.pressedReplacingLast) }
     func release() { yielded += 1; continuation.yield(.released) }
 }
 
@@ -293,14 +294,20 @@ actor RecordingInjector: TextInjecting {
     private(set) var calls: [Call] = []
     private var outcomes: [InjectionOutcome]
     private let fallback: InjectionOutcome
+    private let events: EventLog<String>?
+    private let name: String
 
-    init(outcomes: [InjectionOutcome] = [], fallback: InjectionOutcome = .success) {
+    /// `events` + `name` put each call into a shared log, for cross-adapter ordering assertions.
+    init(outcomes: [InjectionOutcome] = [], fallback: InjectionOutcome = .success, events: EventLog<String>? = nil, name: String = "") {
         self.outcomes = outcomes
         self.fallback = fallback
+        self.events = events
+        self.name = name
     }
 
     func append(_ text: String, to context: TargetContext) async -> InjectionOutcome {
         calls.append(Call(text: text, context: context))
+        events?.append("\(name).append")
         return outcomes.isEmpty ? fallback : outcomes.removeFirst()
     }
 
@@ -349,9 +356,14 @@ actor FakeClipboard: ClipboardWriting {
 actor FakeUndo: UndoPerforming {
     private(set) var calls: [TargetContext] = []
     private let result: Bool
-    init(result: Bool = true) { self.result = result }
+    private let events: EventLog<String>?
+    init(result: Bool = true, events: EventLog<String>? = nil) {
+        self.result = result
+        self.events = events
+    }
     func undo(_ context: TargetContext) async -> Bool {
         calls.append(context)
+        events?.append("undo")
         return result
     }
     func callCount() -> Int { calls.count }
@@ -445,4 +457,100 @@ final class EventLog<Event: Sendable>: @unchecked Sendable {
     func append(_ event: Event) { lock.withLock { events.append(event) } }
     var all: [Event] { lock.withLock { events } }
     func snapshot() -> [Event] { all }
+}
+
+/// A text field the engine can read back, with switchable faults. Models only what AX exposes:
+/// UTF-16 text, one selection, and the six `FieldAccessing` operations. `ops` is the call order.
+actor FakeField: FieldAccessing {
+    enum Fault: Hashable {
+        case countUnreadable, selectionUnreadable, stringForRangeUnreadable, valueUnreadable
+        case setRangeFails, setRangeIgnored  // refused outright / accepted but nothing moves
+        case replaceFails, replaceIgnored  // refused outright / accepted but nothing written
+    }
+
+    private(set) var units: [UInt16]
+    private(set) var selection: FieldRange
+    private(set) var ops: [String] = []
+    private var faults: Set<Fault> = []
+
+    init(_ text: String = "", caret: Int? = nil) {
+        let units = Array(text.utf16)
+        self.units = units
+        selection = FieldRange(location: caret ?? units.count, length: 0)
+    }
+
+    var string: String { String(utf16CodeUnits: units, count: units.count) }
+    func setFaults(_ faults: Set<Fault>) { self.faults = faults }
+    func clearOps() { ops = [] }
+
+    /// What an AX insert does: the selection becomes `text`, the caret lands after it.
+    func insert(_ text: String) {
+        ops.append("write")
+        let new = Array(text.utf16)
+        units.replaceSubrange(selection.location..<selection.location + selection.length, with: new)
+        selection = FieldRange(location: selection.location + new.count, length: 0)
+    }
+
+    /// The user typing at the caret, outside the engine.
+    func userTypes(_ text: String) { let saved = ops; insert(text); ops = saved }
+    func userMovesCaret(to location: Int) { selection = FieldRange(location: location, length: 0) }
+    func userEdits(at location: Int, to text: String) {
+        let new = Array(text.utf16)
+        units.replaceSubrange(location..<location + new.count, with: new)
+    }
+
+    func selectedRange(_ context: TargetContext) async -> FieldRange? {
+        ops.append("selectedRange")
+        return faults.contains(.selectionUnreadable) ? nil : selection
+    }
+
+    func characterCount(_ context: TargetContext) async -> Int? {
+        ops.append("characterCount")
+        return faults.contains(.countUnreadable) ? nil : units.count
+    }
+
+    func text(in range: FieldRange, _ context: TargetContext) async -> String? {
+        ops.append("stringForRange")
+        return faults.contains(.stringForRangeUnreadable) ? nil : slice(range)
+    }
+
+    func valueSubstring(in range: FieldRange, _ context: TargetContext) async -> String? {
+        ops.append("valueSubstring")
+        return faults.contains(.valueUnreadable) ? nil : slice(range)
+    }
+
+    func setSelectedRange(_ range: FieldRange, _ context: TargetContext) async -> Bool {
+        ops.append("setSelectedRange")
+        if faults.contains(.setRangeFails) { return false }
+        if !faults.contains(.setRangeIgnored) { selection = range }
+        return true
+    }
+
+    func replaceSelection(with text: String, _ context: TargetContext) async -> Bool {
+        ops.append("replaceSelection")
+        if faults.contains(.replaceFails) { return false }
+        if !faults.contains(.replaceIgnored) { insert(text); ops.removeLast() }
+        return true
+    }
+
+    private func slice(_ range: FieldRange) -> String? {
+        guard range.location >= 0, range.location + range.length <= units.count else { return nil }
+        let part = Array(units[range.location..<range.location + range.length])
+        return String(utf16CodeUnits: part, count: part.count)
+    }
+}
+
+/// The AX injector against a `FakeField`: inserts at the caret and reports `.success`.
+actor FieldInjector: TextInjecting {
+    private let field: FakeField
+    private let events: EventLog<String>?
+    init(_ field: FakeField, events: EventLog<String>? = nil) {
+        self.field = field
+        self.events = events
+    }
+    func append(_ text: String, to context: TargetContext) async -> InjectionOutcome {
+        await field.insert(text)
+        events?.append("inject")
+        return .success
+    }
 }

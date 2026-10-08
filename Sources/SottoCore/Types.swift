@@ -131,6 +131,9 @@ public struct DictionaryTerm: Sendable, Equatable, Hashable, Codable {
 
 public enum HotkeyEvent: Sendable, Equatable {
     case pressed
+    /// The replace-last binding went down. The mode is decided here and nothing during the hold
+    /// changes it; a `.released` from either binding ends the recording.
+    case pressedReplacingLast
     case released
 }
 

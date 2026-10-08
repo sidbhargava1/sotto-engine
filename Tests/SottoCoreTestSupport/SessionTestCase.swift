@@ -22,6 +22,7 @@ class SessionTestCase: XCTestCase {
         let settings: InMemorySettings
         let clipboard: FakeClipboard
         let undo: FakeUndo
+        let fields: (any FieldAccessing)?
     }
 
     func makeHarness(
@@ -48,15 +49,17 @@ class SessionTestCase: XCTestCase {
         sleep: @escaping Deadline.Sleeper = Deadline.realSleep,
         chain: ((_ ax: RecordingInjector, _ paste: RecordingInjector, _ unicode: RecordingInjector) -> InjectorChain)? = nil,
         injectionPolicy: (any InjectionPolicy)? = nil,
-        voiceCommands: Bool = true
+        voiceCommands: Bool = true,
+        fields: (any FieldAccessing)? = nil,
+        events: EventLog<String>? = nil
     ) -> Harness {
         let hotkey = FakeHotkeyMonitor()
-        let ax = RecordingInjector(outcomes: axOutcomes)
-        let paste = RecordingInjector(outcomes: pasteOutcomes)
-        let unicode = RecordingInjector(outcomes: unicodeOutcomes)
+        let ax = RecordingInjector(outcomes: axOutcomes, events: events, name: "ax")
+        let paste = RecordingInjector(outcomes: pasteOutcomes, events: events, name: "paste")
+        let unicode = RecordingInjector(outcomes: unicodeOutcomes, events: events, name: "unicode")
         let settings = InMemorySettings(initial)
         let clipboard = FakeClipboard()
-        let undo = FakeUndo(result: undoResult)
+        let undo = FakeUndo(result: undoResult, events: events)
         let session = DictationSession(
             hotkey: hotkey,
             audio: audio,
@@ -79,9 +82,10 @@ class SessionTestCase: XCTestCase {
             onTiming: onTiming,
             livePartials: livePartials,
             displayGate: displayGate,
-            voiceCommands: voiceCommands
+            voiceCommands: voiceCommands,
+            fieldAccess: fields
         )
-        return Harness(session: session, hotkey: hotkey, audio: audio, transcriber: transcriber, ax: ax, paste: paste, unicode: unicode, context: context, settings: settings, clipboard: clipboard, undo: undo)
+        return Harness(session: session, hotkey: hotkey, audio: audio, transcriber: transcriber, ax: ax, paste: paste, unicode: unicode, context: context, settings: settings, clipboard: clipboard, undo: undo, fields: fields)
     }
 
     func collectStates(_ h: Harness) async -> StateLog {
