@@ -509,7 +509,7 @@ public actor DictationSession {
 
         let delivery: Delivery
         if replacing {
-            delivery = await deliverReplace(rawTranscript: transcript, context: context, focusMoved: focusMoved, epoch: epoch, stream: stream, clock: clock)
+            delivery = await deliverReplace(rawTranscript: transcript, context: context, focusMoved: focusMoved, stream: stream, clock: clock)
         } else if focusMoved || !context.hasEditableTarget { // DS-06: no target app, or focus moved off the press-time app before release -> clipboard
             let reason: DegradedReason = context.accessibilityGranted ? .copiedNoTarget : .copiedNoAX
             delivery = await deliverToClipboard(rawTranscript: transcript, reason: reason, stream: stream, clock: clock)
@@ -794,7 +794,7 @@ public actor DictationSession {
     /// Replace mode at landing, under `injectionLock`: the whole replacement is collected first (it
     /// is written once, or not at all), then the guard runs against the landing as it stands now.
     /// Any refusal leaves the old text byte-identical and puts the new text on the clipboard.
-    private func deliverReplace(rawTranscript: String, context: TargetContext, focusMoved: Bool, epoch: Int, stream: AsyncThrowingStream<String, Error>, clock: UtteranceClock) async -> Delivery {
+    private func deliverReplace(rawTranscript: String, context: TargetContext, focusMoved: Bool, stream: AsyncThrowingStream<String, Error>, clock: UtteranceClock) async -> Delivery {
         emit(.cleaning)
         let (text, fellBack, truncated) = await collect(stream, rawTranscript: rawTranscript)
         emit(.injecting)
@@ -803,8 +803,7 @@ public actor DictationSession {
         if let refusal = ReplaceLast.screen(rec, context: context, focusMoved: focusMoved, pressedAt: clock.pressedAt) {
             result = .refused(refusal)
         } else if let rec {
-            var replace = ReplaceLast(fields: fieldAccess, paste: injectors.injector(for: .paste), undo: undo, allowUnprovable: allowUnprovableReplace)
-            replace.abort = { [weak self] in await self?.landingEpoch != epoch }
+            let replace = ReplaceLast(fields: fieldAccess, paste: injectors.injector(for: .paste), undo: undo, allowUnprovable: allowUnprovableReplace)
             result = await replace.run(text, over: rec, context: context)
         } else {
             result = .refused(.nothingToReplace)
