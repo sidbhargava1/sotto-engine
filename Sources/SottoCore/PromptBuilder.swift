@@ -67,6 +67,9 @@ public enum PromptBuilder {
     Input: I mean, the plan works, and actually it's cheap.
     Output: I mean, the plan works, and actually it's cheap.
 
+    Input: Let's push it to Thursday, actually Friday would be better since the venue is free.
+    Output: Let's push it to Friday. It would be better since the venue is free.
+
     Input: could you water the plants before you leave and also lock the back door
     Output: Could you water the plants before you leave and also lock the back door?
 
