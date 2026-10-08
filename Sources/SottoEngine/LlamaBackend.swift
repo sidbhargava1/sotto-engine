@@ -32,6 +32,8 @@ public enum LlamaBackend {
             llamaLog.info("warm-up decode in \(ms(took), privacy: .public)ms")
         case .decoded(let tail, let output, let ttft, let tps):
             llamaLog.info("decoded: tail=\(tail, privacy: .public) out=\(output, privacy: .public) ttftMs=\(ttft.map(ms) ?? -1, privacy: .public) tokPerSec=\(Int(tps.rounded()), privacy: .public)")
+        case .servedOldPrefix:
+            llamaLog.info("dictionary changed: served on the live prefix while the new one builds")
         case .stopped(let reason):
             llamaLog.notice("decode stopped: \(String(describing: reason), privacy: .public)")
         case .failed(let reason):
@@ -63,6 +65,12 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
     private var sampler: UnsafeMutablePointer<llama_sampler>?
     private var pendingBytes: [UInt8] = []  // a multi-byte character can span tokens
     private var undecoded: llama_token?     // decoded on the next call, keeping it off TTFT
+    // Two sequences share one unified KV buffer: `live` serves requests, `staged` is the next prefix
+    // being built beside it; commit swaps the roles (no copy back).
+    private var liveSeq: llama_seq_id = 0
+    private var stagedSeq: llama_seq_id = 1
+    private var stagedActive = false
+    private var livePosition = 0  // next position on the live sequence
 
     private static let backendInit: Void = {
         llama_log_set({ level, text, _ in
@@ -97,6 +105,8 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
         var contextParams = llama_context_default_params()
         contextParams.n_ctx = UInt32(contextSize)
         contextParams.n_batch = UInt32(contextSize)  // a whole prefix decodes in one call
+        contextParams.n_seq_max = 2       // live + staged prefix
+        contextParams.kv_unified = true   // one n_ctx pool for both, so shared cells count once
         guard let context = llama_init_from_model(model, contextParams) else { throw Failure.createContext }
         self.context = context
         vocab = llama_model_get_vocab(model)
@@ -123,19 +133,52 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
 
     func resetAndPrefill(_ tokens: [Int32]) throws {
         llama_memory_clear(llama_get_memory(context), true)
-        try decode(tokens)
+        stagedActive = false
+        livePosition = 0
+        try decode(tokens, seq: liveSeq, from: 0)
+        livePosition = tokens.count
     }
 
     func replaceTail(_ tokens: [Int32], after prefixLength: Int) throws {
-        llama_memory_seq_rm(llama_get_memory(context), 0, Int32(prefixLength), -1)
+        llama_memory_seq_rm(llama_get_memory(context), liveSeq, Int32(prefixLength), -1)
         llama_sampler_reset(sampler)
         pendingBytes = []
         undecoded = nil
-        try decode(tokens)
+        try decode(tokens, seq: liveSeq, from: prefixLength)
+        livePosition = prefixLength + tokens.count
+    }
+
+    var supportsStagedPrefix: Bool { true }
+
+    func beginStagedPrefix(keeping shared: Int) throws {
+        discardStagedPrefix()
+        llama_memory_seq_cp(llama_get_memory(context), liveSeq, stagedSeq, 0, Int32(shared))
+        stagedActive = true
+    }
+
+    func stagePrefill(_ tokens: [Int32], at position: Int) throws {
+        try decode(tokens, seq: stagedSeq, from: position)
+    }
+
+    func commitStagedPrefix() {
+        guard stagedActive else { return }
+        llama_memory_seq_rm(llama_get_memory(context), liveSeq, -1, -1)
+        swap(&liveSeq, &stagedSeq)
+        stagedActive = false
+        undecoded = nil
+    }
+
+    func discardStagedPrefix() {
+        guard stagedActive else { return }
+        llama_memory_seq_rm(llama_get_memory(context), stagedSeq, -1, -1)
+        stagedActive = false
     }
 
     func sampleNext() throws -> String? {
-        if let previous = undecoded { try decode([previous]) }
+        if let previous = undecoded {
+            try decode([previous], seq: liveSeq, from: livePosition)
+            livePosition += 1
+        }
         let token = llama_sampler_sample(sampler, context, -1)
         undecoded = nil
         if llama_vocab_is_eog(vocab, token) { return nil }
@@ -146,11 +189,20 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
         return String(decoding: pendingBytes.prefix(valid), as: UTF8.self)
     }
 
-    private func decode(_ tokens: [Int32]) throws {
-        var tokens = tokens
-        let code = tokens.withUnsafeMutableBufferPointer { buffer in
-            llama_decode(context, llama_batch_get_one(buffer.baseAddress, Int32(buffer.count)))
+    /// Explicit positions and sequence id; only the last token asks for logits.
+    private func decode(_ tokens: [Int32], seq: llama_seq_id, from position: Int) throws {
+        guard !tokens.isEmpty else { return }
+        var batch = llama_batch_init(Int32(tokens.count), 0, 1)
+        defer { llama_batch_free(batch) }
+        batch.n_tokens = Int32(tokens.count)
+        for (i, token) in tokens.enumerated() {
+            batch.token[i] = token
+            batch.pos[i] = Int32(position + i)
+            batch.n_seq_id[i] = 1
+            batch.seq_id[i]![0] = seq
+            batch.logits[i] = i == tokens.count - 1 ? 1 : 0
         }
+        let code = llama_decode(context, batch)
         guard code == 0 else { throw Failure.decode(code) }
     }
 
