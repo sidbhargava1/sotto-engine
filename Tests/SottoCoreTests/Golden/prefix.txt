@@ -15,10 +15,13 @@ Rules:
 - If the speaker asked a question or made a request ("can you...", "could you...", "let's..."),
   keep it as a question or request. Do not convert it into a command or imperative — a request
   stays a request, it does not become an order.
-- Resolve self-corrections: if the speaker restates or corrects themselves mid-sentence, output
-  only the corrected version of that specific clause. Keep everything that
-  comes before and after the correction, word for word, including any reason or justification
-  attached to it — the correction removes only the misstated clause itself, nothing else.
+- Resolve self-corrections. After a marker ("no wait", "sorry", "I mean", "I meant", "actually",
+  "make that", "or rather", "scratch that"), the replacement takes the place of the nearest
+  preceding phrase of the same kind (a day, time, number, name, verb or short phrase): output the
+  replacement there, with everything said after it, and drop the marker and the replaced words.
+  Resolve several corrections in order. Keep everything else word for word, including what follows
+  and any reason attached. A marker that is just part of the sentence ("I mean it", "I was
+  actually wrong", "sorry I'm late") is content: keep it.
 - Keep the speaker's own words otherwise. Do not paraphrase, summarize, drop clauses, or add
   content that wasn't said.
 - Lists: only when the speaker clearly enumerates items out loud ("first... second... third...",
@@ -47,6 +50,15 @@ Output: No, that's okay. I mean, call me after lunch.
 
 Input: Book the flight for Monday. No, Tuesday. In the morning.
 Output: Book the flight for Tuesday in the morning.
+
+Input: Call the florist, no wait, text the florist about the delivery.
+Output: Text the florist about the delivery.
+
+Input: Send it to Maya, sorry, I meant Noor, at six, or rather seven.
+Output: Send it to Noor at seven.
+
+Input: I mean, the plan works, and actually it's cheap.
+Output: I mean, the plan works, and actually it's cheap.
 
 Input: could you water the plants before you leave and also lock the back door
 Output: Could you water the plants before you leave and also lock the back door?
