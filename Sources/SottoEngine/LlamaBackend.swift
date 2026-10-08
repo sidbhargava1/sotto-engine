@@ -70,6 +70,7 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
     private var liveSeq: llama_seq_id = 0
     private var stagedSeq: llama_seq_id = 1
     private var stagedActive = false
+    private(set) var swaps = 0  // committed staged prefixes (tests assert the staged path was taken)
     private var livePosition = 0  // next position on the live sequence
 
     private static let backendInit: Void = {
@@ -157,13 +158,14 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
     }
 
     func stagePrefill(_ tokens: [Int32], at position: Int) throws {
-        try decode(tokens, seq: stagedSeq, from: position)
+        try decode(tokens, seq: stagedSeq, from: position, logits: false)  // a prefix needs no outputs
     }
 
     func commitStagedPrefix() {
         guard stagedActive else { return }
         llama_memory_seq_rm(llama_get_memory(context), liveSeq, -1, -1)
         swap(&liveSeq, &stagedSeq)
+        swaps += 1
         stagedActive = false
         undecoded = nil
     }
@@ -189,8 +191,8 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
         return String(decoding: pendingBytes.prefix(valid), as: UTF8.self)
     }
 
-    /// Explicit positions and sequence id; only the last token asks for logits.
-    private func decode(_ tokens: [Int32], seq: llama_seq_id, from position: Int) throws {
+    /// Explicit positions and sequence id; only the last token asks for logits (none for staged prefill).
+    private func decode(_ tokens: [Int32], seq: llama_seq_id, from position: Int, logits: Bool = true) throws {
         guard !tokens.isEmpty else { return }
         var batch = llama_batch_init(Int32(tokens.count), 0, 1)
         defer { llama_batch_free(batch) }
@@ -200,7 +202,7 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
             batch.pos[i] = Int32(position + i)
             batch.n_seq_id[i] = 1
             batch.seq_id[i]![0] = seq
-            batch.logits[i] = i == tokens.count - 1 ? 1 : 0
+            batch.logits[i] = logits && i == tokens.count - 1 ? 1 : 0
         }
         let code = llama_decode(context, batch)
         guard code == 0 else { throw Failure.decode(code) }
