@@ -137,6 +137,23 @@ struct ReplaceLast {
     let paste: (any TextInjecting)?
     let undo: any UndoPerforming
     let allowUnprovable: Bool
+    /// Asked right before a write: true when the host cleared the last landing meanwhile.
+    var abort: @Sendable () async -> Bool = { false }
+
+    private func shouldAbort() async -> Bool { await abort() }
+
+    private func readText(in range: FieldRange, _ fields: any FieldAccessing, _ context: TargetContext) async -> String? {
+        if let read = await fields.text(in: range, context) { return read }
+        return await fields.valueSubstring(in: range, context)
+    }
+
+    /// True only if the selection reads back as the caret: a failed restore would leave the old text
+    /// selected, and the next keystroke would delete it.
+    private func restoreCaret(_ caret: FieldRange, _ fields: any FieldAccessing, _ context: TargetContext) async -> Bool {
+        if await fields.selectedRange(context) == caret { return true }
+        _ = await fields.setSelectedRange(caret, context)
+        return await fields.selectedRange(context) == caret
+    }
 
     /// The checks that need no field access. nil means go on.
     static func screen(_ rec: LastLanding?, context: TargetContext, focusMoved: Bool, pressedAt: ContinuousClock.Instant) -> ReplaceRefusal? {
@@ -157,6 +174,7 @@ struct ReplaceLast {
     }
 
     func run(_ new: String, over rec: LastLanding, context: TargetContext) async -> ReplaceResult {
+        if await shouldAbort() { return .refused(.nothingToReplace) }
         if Self.sameText(new, rec.landedText) { return .sameAsBefore }
         switch rec.replacePath {
         case .refuse(let reason): return .refused(reason)
@@ -166,9 +184,12 @@ struct ReplaceLast {
     }
 
     // Undo then paste, back to back. Nothing can be read back, so this is only as safe as the
-    // landing being one paste write (one ⌘Z) in the same field under the same window.
+    // landing being one paste write (one ⌘Z) in the same field under the same window. If undo
+    // succeeds and the paste then fails the old text is gone: `.unconfirmed`, and a host label for
+    // it must not say the old text was kept.
     private func pasteReplace(_ new: String, context: TargetContext) async -> ReplaceResult {
         guard allowUnprovable, let paste else { return .refused(.cantCheckField) }
+        if await shouldAbort() { return .refused(.nothingToReplace) }
         guard await undo.undo(context) else { return .refused(.cantCheckField) }  // nothing was posted
         guard await paste.append(new, to: context) != .failed else { return .unconfirmed }
         return .replaced(.paste, fieldCount: nil)
@@ -188,31 +209,36 @@ struct ReplaceLast {
         guard current == rec.landedText else { return .refused(.textChanged) }
 
         guard await fields.setSelectedRange(range, context), await fields.selectedRange(context) == range else {
-            _ = await fields.setSelectedRange(caret, context)  // best effort: put the caret back
-            return .refused(.cantCheckField)
+            return await restoreCaret(caret, fields, context) ? .refused(.cantCheckField) : .unconfirmed
         }
+        // A clear (lock, sleep, quit) during the steps above stops the write; nothing has changed yet.
+        if await shouldAbort() {
+            return await restoreCaret(caret, fields, context) ? .refused(.nothingToReplace) : .unconfirmed
+        }
+        let newRange = FieldRange(location: range.location, length: new.utf16.count)
         guard await fields.replaceSelection(with: new, context) else {
-            // The write was refused outright. If the count says nothing moved, the old text stands.
-            let after = await fields.characterCount(context)
-            if after == oldCount {
-                _ = await fields.setSelectedRange(caret, context)
-                return .refused(.cantCheckField)
+            // Rejected, but Chromium/Electron often report an error and apply the write a moment
+            // later, and new text of the same length leaves the count unchanged. So poll count and
+            // text; the old text stands only if it still reads exactly what we typed.
+            for attempt in 0..<6 {
+                if attempt > 0 { try? await Task.sleep(for: .milliseconds(20)) }
+                let count = await fields.characterCount(context)
+                let now = await readText(in: range, fields, context)
+                guard count == oldCount, now == rec.landedText else { return .unconfirmed }
             }
-            return .unconfirmed
+            return await restoreCaret(caret, fields, context) ? .refused(.cantCheckField) : .unconfirmed
         }
 
-        let newRange = FieldRange(location: range.location, length: new.utf16.count)
         let expected = oldCount - range.length + newRange.length
         // Chromium/Electron apply AX writes asynchronously; poll before calling it a miss.
         var after = await fields.characterCount(context)
-        for _ in 0..<5 where after != expected {
+        var landed = await readText(in: newRange, fields, context)
+        for _ in 0..<5 where after != expected || landed != new {
             try? await Task.sleep(for: .milliseconds(20))
             after = await fields.characterCount(context)
+            landed = await readText(in: newRange, fields, context)
         }
-        guard after == expected else { return .unconfirmed }
-        let landed: String?
-        if let read = await fields.text(in: newRange, context) { landed = read } else { landed = await fields.valueSubstring(in: newRange, context) }
-        guard landed == new else { return .unconfirmed }
+        guard after == expected, landed == new else { return .unconfirmed }
         _ = await fields.setSelectedRange(FieldRange(location: newRange.end, length: 0), context)
         return .replaced(.axVerified, fieldCount: after)
     }

@@ -114,14 +114,14 @@ The engine's tests build this exact set of adapters with a plain `import SottoEn
 
 A second hotkey event, `HotkeyEvent.pressedReplacingLast`, records like a normal press (a `.released` from either binding ends it) and swaps the previous landing for the new text, only where the engine can prove it wrote what it overwrites. The mode is fixed at key-down.
 
-The engine keeps a `LastLanding` in memory (`session.lastLanding`): app, element, strategy, the UTF-16 range it inserted (read from `kAXSelectedTextRange` before the write), the field's character count after, the landed and raw text, and the number of writes. It is never created for a secure field or an app the host's `HistoryRecording.isExcluded` names, checked after every landing whether or not History is on. Call `session.clearLastLanding(because:)` on screen lock, sleep and quit.
+The engine keeps a `LastLanding` in memory (`session.lastLanding`): app, element, strategy, the UTF-16 range it inserted (read from `kAXSelectedTextRange` before the write), the field's character count after, the landed and raw text, and the number of writes. It is never created for a secure field or an app the host's `HistoryRecording.isExcluded` names, checked after every landing whether or not History is on. `isExcluded` defaults to false, so it fails open: a host with an exclusion list must implement it. Call `session.clearLastLanding(because:)` on screen lock, sleep and quit.
 
 At landing, under the injection lock, a replace goes ahead only if the last landing exists, is not a terminal, was not scratched, is in the same app and element (nil never matches), and the press came within 30 s of it. Then, in order:
 
 - New text equal to the old after trimming: nothing is written (`.sameAsBefore`).
 - Landed through Accessibility and verified: the field's count and caret must still match, and `kAXStringForRange` (or a read-only `kAXValue` substring) must still equal the landed text. The engine then selects the old range, writes `kAXSelectedText`, confirms length and text, and restores the caret. Any failure before the write leaves the old text in place. There is no put-back.
 - Landed by paste: only if the host called `setAllowUnprovableReplace(true)` and the landing was one write; the engine posts undo, then paste.
-- Anything else, including typed text and terminals, is refused.
+- Anything else, including typed text and terminals, is refused. If undo succeeds and the paste then fails, the outcome is `.unconfirmed` (the old text is gone), so a host label for it must not say the old text was kept.
 
 A refusal puts the new text on the clipboard and reports a `ReplaceRefusal` (`nothingToReplace`, `differentField`, `tooLongAgo`, `terminal`, `textChanged`, `cantCheckField`) on `session.replaceOutcomes()`. Empty recognition is the usual error and touches nothing. A replace right after a successful "scratch that" in the same field types normally. If an earlier utterance is still processing, it lands first and the replace is checked against it. Hosts pass an `AXFieldAccess()` as `DictationSession(fieldAccess:)`; without one nothing is ever verified and every replace is refused. For every landing the log records which path a replace would take (no text), under the `session` category.
 
