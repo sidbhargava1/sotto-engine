@@ -17,4 +17,25 @@ public protocol LanguageModelEngine: AnyObject, Sendable {
     func sampleNext() throws -> String?
     /// Frees the context and weights; `load()` may run again later.
     func unload()
+
+    // Staged prefix (optional): build a replacement prefix in a second sequence while the live
+    // one keeps serving requests, then swap. Engines that don't implement it return false and the
+    // backend rebuilds in place.
+    var supportsStagedPrefix: Bool { get }
+    /// Starts a second sequence that shares the first `keeping` tokens of the live prefix.
+    func beginStagedPrefix(keeping shared: Int) throws
+    /// Decodes `tokens` into the staged sequence, starting at position `position`.
+    func stagePrefill(_ tokens: [Int32], at position: Int) throws
+    /// The staged sequence becomes the live one; the old prefix and its tail are dropped.
+    func commitStagedPrefix()
+    /// Drops the staged sequence; the live one is untouched. No-op when nothing is staged.
+    func discardStagedPrefix()
+}
+
+extension LanguageModelEngine {
+    public var supportsStagedPrefix: Bool { false }
+    public func beginStagedPrefix(keeping shared: Int) throws {}
+    public func stagePrefill(_ tokens: [Int32], at position: Int) throws {}
+    public func commitStagedPrefix() {}
+    public func discardStagedPrefix() {}
 }

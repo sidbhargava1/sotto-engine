@@ -11,6 +11,8 @@ public enum ModelBackendEvent: Sendable {
     case warmedUp(took: Duration)
     case decoded(tailTokens: Int, outputTokens: Int, ttft: Duration?, tokensPerSecond: Double)
     case stopped(CleanupError)
+    /// A request's dictionary didn't match the live prefix; it decoded against the live one while the new one builds.
+    case servedOldPrefix
     case failed(String)
     /// The voice-profile narrative (rulings must-fix 5). `outcome` is a fixed word, never text.
     case generated(promptTokens: Int, outputTokens: Int, took: Duration, outcome: String)
@@ -31,6 +33,18 @@ public actor ModelCleanupBackend: CleanupBackend {
     /// What `cachedPrefix` returns to after a narrative borrowed the KV.
     private var dictationPrefix: String?
     private var prefixLength = 0
+    private var prefixTokens: [Int32] = []
+    // Staged re-prefill (a second sequence). `stagingGeneration` retires a superseded or cancelled
+    // build: its loop notices at the next batch and leaves the engine alone.
+    private var stagingTarget: String?
+    private var stagingTask: Task<Void, Never>?
+    private var stagingGeneration = 0
+    private var stagedCells = 0
+    /// Tokens per staged decode. A request that arrives mid-build waits for at most one batch.
+    static let stagingBatch = 64
+    /// KV cells kept free for the live tail and output while a second prefix is being staged
+    /// (the cap is 2 x tail + 64, so this covers a tail of about 320 tokens, far above a minute of speech).
+    public static let stagingReserve = 1024
 
     public nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
 
@@ -59,10 +73,19 @@ public actor ModelCleanupBackend: CleanupBackend {
     }
 
     /// WR-05: eager re-prefill after a dictionary edit, off the hotkey path. No-op before load.
-    public func prepare(dictionary: [String]) {
+    /// With a staging-capable engine the old prefix keeps serving requests until the new one is
+    /// ready; returns once the swap has happened (or the build was superseded).
+    public func prepare(dictionary: [String]) async {
         guard isReady else { return }
         let prefix = PromptBuilder.prefix(dictionary: dictionary)
-        guard prefix != cachedPrefix else { return }
+        if prefix == cachedPrefix {
+            if stagingTarget != nil { cancelStaging() }  // the edit was undone
+            return
+        }
+        if cachedPrefix != nil, let building = stage(prefix) {
+            await building.value
+            return
+        }
         do { try rebuildPrefix(prefix) } catch { onEvent(.failed(String(describing: error))) }
     }
 
@@ -76,6 +99,7 @@ public actor ModelCleanupBackend: CleanupBackend {
     /// Before process exit: llama.cpp's Metal teardown asserts if a context outlives it.
     public func shutdown() {
         beginShutdown()
+        cancelStaging()
         cachedPrefix = nil
         engine.unload()
     }
@@ -114,6 +138,8 @@ public actor ModelCleanupBackend: CleanupBackend {
         }
         do {
             try live()
+            if let pending = stagingTarget { dictationPrefix = pending }  // restore the newest dictionary afterwards
+            cancelStaging()
             cachedPrefix = nil  // before the KV changes: nothing may decode against it as a dictation prefix
             let head = try engine.tokenize(ChatML.prefix(system))
             let tail = try engine.tokenize(ChatML.tail(user))
@@ -175,11 +201,21 @@ public actor ModelCleanupBackend: CleanupBackend {
         do {
             let prompt = PromptBuilder.build(request)
             try checkLive(id)
-            // LB-10/WR-06: never decode a tail on a stale prefix; rebuild first, inside the budget.
-            if prompt.prefix != cachedPrefix { try rebuildPrefix(prompt.prefix) }
+            // LB-10/WR-06: never decode a tail on a prefix that doesn't match the KV. With staging, a
+            // request whose dictionary differs decodes against the live prefix as it is (prompt and KV
+            // agree; only the new term is missing, and the heard-as rewrite already applied it) and
+            // the backend starts the re-prefill itself. Without it, rebuild first, inside the budget.
+            if prompt.prefix != cachedPrefix {
+                if cachedPrefix != nil, stage(prompt.prefix) != nil {
+                    onEvent(.servedOldPrefix)
+                } else {
+                    try rebuildPrefix(prompt.prefix)
+                }
+            }
             let tail = try engine.tokenize(ChatML.tail(prompt.tail))
             let cap = 2 * tail.count + 64
-            guard prefixLength + tail.count + cap <= engine.contextSize else { throw CleanupError.contextOverflow }
+            if stagedCells > 0, prefixLength + stagedCells + tail.count + cap > engine.contextSize { cancelStaging() }
+            guard prefixLength + stagedCells + tail.count + cap <= engine.contextSize else { throw CleanupError.contextOverflow }
             try engine.replaceTail(tail, after: prefixLength)
 
             var stripper = ThinkStripper()
@@ -234,12 +270,88 @@ public actor ModelCleanupBackend: CleanupBackend {
 
     private func rebuildPrefix(_ prefix: String) throws {
         let start = ContinuousClock.now
+        cancelStaging()  // a full reset clears every sequence
         cachedPrefix = nil // a failed rebuild must not leave the old text claiming the new KV
         let tokens = try engine.tokenize(ChatML.prefix(prefix))
         try engine.resetAndPrefill(tokens)
+        prefixTokens = tokens
         prefixLength = tokens.count
         cachedPrefix = prefix
         dictationPrefix = prefix
         onEvent(.prefixReady(tokens: tokens.count, took: .now - start))
+    }
+
+    // MARK: staged re-prefill
+
+    /// The task building `prefix` beside the live one: started, restarted (a newer edit
+    /// supersedes an older build) or joined if already running. nil when the engine can't stage or
+    /// the second sequence wouldn't fit; the caller rebuilds in place then.
+    private func stage(_ prefix: String) -> Task<Void, Never>? {
+        guard engine.supportsStagedPrefix, cachedPrefix != nil else { return nil }
+        if stagingTarget == prefix, let task = stagingTask { return task }
+        cancelStaging()
+        guard let tokens = try? engine.tokenize(ChatML.prefix(prefix)) else { return nil }
+        var shared = 0
+        while shared < min(tokens.count, prefixTokens.count), tokens[shared] == prefixTokens[shared] { shared += 1 }
+        // Shared cells are stored once; only the changed part costs extra.
+        guard prefixLength + (tokens.count - shared) + Self.stagingReserve <= engine.contextSize else { return nil }
+        do { try engine.beginStagedPrefix(keeping: shared) } catch {
+            engine.discardStagedPrefix()
+            onEvent(.failed(String(describing: error)))
+            return nil
+        }
+        stagingGeneration += 1
+        let generation = stagingGeneration
+        stagingTarget = prefix
+        stagedCells = 0
+        let task = Task { await self.runStaging(prefix, tokens, shared: shared, generation: generation) }
+        stagingTask = task
+        return task
+    }
+
+    /// Small batches with a suspension between each, so a queued request runs between two batches
+    /// instead of behind the whole prefill. Decodes never interleave with a batch (one queue).
+    private func runStaging(_ prefix: String, _ tokens: [Int32], shared: Int, generation: Int) async {
+        let start = ContinuousClock.now
+        var position = shared
+        do {
+            while position < tokens.count {
+                guard generation == stagingGeneration, isReady else { return }
+                let end = min(position + Self.stagingBatch, tokens.count)
+                try engine.stagePrefill(Array(tokens[position..<end]), at: position)
+                stagedCells += end - position
+                position = end
+                await Task.yield()
+            }
+            guard generation == stagingGeneration, isReady else { return }
+            engine.commitStagedPrefix()
+            prefixTokens = tokens
+            prefixLength = tokens.count
+            cachedPrefix = prefix
+            dictionaryPrefixSwapped(prefix)
+            onEvent(.prefixReady(tokens: tokens.count, took: .now - start))
+        } catch {
+            guard generation == stagingGeneration else { return }
+            cancelStaging()
+            onEvent(.failed(String(describing: error)))
+        }
+    }
+
+    private func dictionaryPrefixSwapped(_ prefix: String) {
+        dictationPrefix = prefix
+        stagingTarget = nil
+        stagingTask = nil
+        stagedCells = 0
+        stagingGeneration += 1
+    }
+
+    private func cancelStaging() {
+        guard stagingTarget != nil else { return }
+        stagingGeneration += 1
+        stagingTask?.cancel()
+        stagingTask = nil
+        stagingTarget = nil
+        stagedCells = 0
+        engine.discardStagedPrefix()
     }
 }

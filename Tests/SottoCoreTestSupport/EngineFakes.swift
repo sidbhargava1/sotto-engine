@@ -11,6 +11,9 @@ final class StubEngine: LanguageModelEngine, @unchecked Sendable {
     var prefillDelay: TimeInterval = 0
     var loadError: Error?
     var endless = false
+    /// Staged-prefix support (a second sequence); off by default so in-place rebuild tests stay as they were.
+    var staged = false
+    var stageDelay: TimeInterval = 0
     private(set) var log: [String] = []
     private var cursor = 0
     private var script: [String] = [] // snapshot per request, so tests can re-script mid-decode
@@ -46,6 +49,15 @@ final class StubEngine: LanguageModelEngine, @unchecked Sendable {
     }
 
     func unload() { record("unload") }
+
+    var supportsStagedPrefix: Bool { staged }
+    func beginStagedPrefix(keeping shared: Int) throws { record("stage-begin:\(shared)") }
+    func stagePrefill(_ tokens: [Int32], at position: Int) throws {
+        if stageDelay > 0 { Thread.sleep(forTimeInterval: stageDelay) }
+        record("stage:\(tokens.count)@\(position)")
+    }
+    func commitStagedPrefix() { record("commit") }
+    func discardStagedPrefix() { record("discard") }
 
     func sampleNext() throws -> String? {
         if tokenDelay > 0 { Thread.sleep(forTimeInterval: tokenDelay) }
