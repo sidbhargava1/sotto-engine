@@ -466,6 +466,8 @@ actor FakeField: FieldAccessing {
         case countUnreadable, selectionUnreadable, stringForRangeUnreadable, valueUnreadable
         case setRangeFails, setRangeIgnored  // refused outright / accepted but nothing moves
         case replaceFails, replaceIgnored  // refused outright / accepted but nothing written
+        case caretRestoreFails  // a set to an empty range is ignored (a set to a real range works)
+        case replaceRejectedAppliesLate, replaceRejectedButApplied  // error returned, write lands 40ms later / at once
     }
 
     private(set) var units: [UInt16]
@@ -522,6 +524,7 @@ actor FakeField: FieldAccessing {
     func setSelectedRange(_ range: FieldRange, _ context: TargetContext) async -> Bool {
         ops.append("setSelectedRange")
         if faults.contains(.setRangeFails) { return false }
+        if faults.contains(.caretRestoreFails), range.length == 0 { return true }
         if !faults.contains(.setRangeIgnored) { selection = range }
         return true
     }
@@ -529,9 +532,16 @@ actor FakeField: FieldAccessing {
     func replaceSelection(with text: String, _ context: TargetContext) async -> Bool {
         ops.append("replaceSelection")
         if faults.contains(.replaceFails) { return false }
+        if faults.contains(.replaceRejectedButApplied) { insert(text); ops.removeLast(); return false }
+        if faults.contains(.replaceRejectedAppliesLate) {
+            Task { try? await Task.sleep(for: .milliseconds(40)); self.applyLate(text) }
+            return false
+        }
         if !faults.contains(.replaceIgnored) { insert(text); ops.removeLast() }
         return true
     }
+
+    private func applyLate(_ text: String) { insert(text); ops.removeLast() }
 
     private func slice(_ range: FieldRange) -> String? {
         guard range.location >= 0, range.location + range.length <= units.count else { return nil }

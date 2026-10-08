@@ -5,11 +5,14 @@ import SottoCore
 
 public struct AXFieldAccess: FieldAccessing {
     private static let timeout: Float = 0.25  // a hung app must not stall the injection lock for long
+    // The caret read sits on the release-to-landed path: like `isSecureNow`, 50ms. A miss only
+    // means that landing isn't replaceable later.
+    private static let caretTimeout: Float = 0.05
 
     public init() {}
 
     public func selectedRange(_ context: TargetContext) async -> FieldRange? {
-        await run(context) { element in
+        await run(context, timeout: Self.caretTimeout) { element in
             var ref: CFTypeRef?
             guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &ref) == .success,
                   let ref, CFGetTypeID(ref) == AXValueGetTypeID()
@@ -56,13 +59,13 @@ public struct AXFieldAccess: FieldAccessing {
     }
 
     /// The element the landing captured; nil (and so a refusal) if the context carries none.
-    private func run<T: Sendable>(_ context: TargetContext, _ body: @Sendable (AXUIElement) -> T) async -> T? {
+    private func run<T: Sendable>(_ context: TargetContext, timeout: Float = AXFieldAccess.timeout, _ body: @Sendable (AXUIElement) -> T) async -> T? {
         guard AXIsProcessTrusted(), let handle = context.elementHandle else { return nil }
         let element = unsafeDowncast(handle.element, to: AXUIElement.self)
         // Own-process elements must be touched on main (AccessibilityFocus "own-process hazard").
         return await AccessibilityFocus.onOwner(of: element) { element -> T? in
             guard let element else { return nil }
-            AXUIElementSetMessagingTimeout(element, Self.timeout)
+            AXUIElementSetMessagingTimeout(element, timeout)
             return body(element)
         }
     }

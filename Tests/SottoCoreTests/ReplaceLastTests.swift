@@ -325,6 +325,84 @@ final class ReplaceLastTests: SessionTestCase {
         XCTAssertEqual(clip, ["send to maria"])
     }
 
+    func test_partial_writeRejectedButAppliedLater_isUnconfirmed() async {
+        let r = await rig(["send to mario", "send to maria"])  // same length: a count check can't tell
+        await speak(r)
+        await r.field.setFaults([.replaceRejectedAppliesLate])
+        await replace(r)
+        let result = await outcome(r)
+        XCTAssertEqual(result, .unconfirmed)
+        let clip = await r.h.clipboard.copied
+        XCTAssertEqual(clip, ["send to maria"])
+    }
+
+    func test_partial_writeRejectedButAppliedAtOnce_sameLength_isUnconfirmed() async {
+        let r = await rig(["send to mario", "send to maria"])
+        await speak(r)
+        await r.field.setFaults([.replaceRejectedButApplied])
+        await replace(r)
+        let result = await outcome(r)
+        XCTAssertEqual(result, .unconfirmed)
+    }
+
+    func test_partial_caretRestoreFails_isUnconfirmed() async {
+        // The range select works, the write is refused, and the caret can't be put back: the old text
+        // would stay selected, so this must not read as a clean refusal.
+        let r = await rig(["send to mario", "send to maria"])
+        await speak(r)
+        await r.field.setFaults([.replaceFails, .caretRestoreFails])
+        await replace(r)
+        let result = await outcome(r)
+        XCTAssertEqual(result, .unconfirmed)
+    }
+
+    func test_clearDuringTheSteps_stopsTheWrite() async {
+        let r = await rig(["send to mario"])
+        await speak(r)
+        let rec = await r.h.session.lastLanding!
+        let replace = ReplaceLast(fields: r.field, paste: nil, undo: FakeUndo(), allowUnprovable: false, abort: { true })
+        let result = await replace.run("send to maria", over: rec, context: fieldContext())
+        XCTAssertEqual(result, .refused(.nothingToReplace))
+        let text = await r.field.string
+        let sel = await r.field.selection
+        XCTAssertEqual(text, "send to mario")
+        XCTAssertEqual(sel, FieldRange(location: 13, length: 0))
+    }
+
+    // MARK: identity edge cases
+
+    func test_nilElementTokenNeverMatches() {
+        let rec = LastLanding(bundleID: "a", elementToken: nil, isTerminalClass: false, strategy: .paste, verified: false, insertedRange: nil,
+                              fieldCount: nil, landedText: "x", rawText: "x", at: .now, date: Date(), writes: 1)
+        let nilCtx = TargetContext(bundleID: "a", isTerminalClass: false, elementToken: nil, accessibilityGranted: true)
+        XCTAssertEqual(ReplaceLast.screen(rec, context: nilCtx, focusMoved: false, pressedAt: .now), .differentField)
+        let withEl = TargetContext(bundleID: "a", isTerminalClass: false, elementToken: AXElementToken(1), accessibilityGranted: true)
+        XCTAssertEqual(ReplaceLast.screen(rec, context: withEl, focusMoved: false, pressedAt: .now), .differentField)
+    }
+
+    func test_nilBundleNeverMatches() {
+        let rec = LastLanding(bundleID: nil, elementToken: AXElementToken(1), isTerminalClass: false, strategy: .ax, verified: true,
+                              insertedRange: FieldRange(location: 0, length: 1), fieldCount: 1, landedText: "x", rawText: "x", at: .now, date: Date(), writes: 1)
+        let ctx = TargetContext(bundleID: nil, isTerminalClass: false, elementToken: AXElementToken(1), accessibilityGranted: true)
+        XCTAssertEqual(ReplaceLast.screen(rec, context: ctx, focusMoved: false, pressedAt: .now), .differentField)
+    }
+
+    func test_focusMovedRefusesInTheGuard() {
+        let rec = LastLanding(bundleID: "a", elementToken: AXElementToken(1), isTerminalClass: false, strategy: .ax, verified: true,
+                              insertedRange: FieldRange(location: 0, length: 1), fieldCount: 1, landedText: "x", rawText: "x", at: .now, date: Date(), writes: 1)
+        let ctx = TargetContext(bundleID: "a", isTerminalClass: false, elementToken: AXElementToken(1), accessibilityGranted: true)
+        XCTAssertNil(ReplaceLast.screen(rec, context: ctx, focusMoved: false, pressedAt: .now))
+        XCTAssertEqual(ReplaceLast.screen(rec, context: ctx, focusMoved: true, pressedAt: .now), .differentField)
+    }
+
+    func test_refuse_focusMovedInSession() async {
+        await assertRefused(.differentField) { r in
+            // Same bundle and element, but the focus owner is another app: resolveTarget reports a move.
+            await r.provider.set(TargetContext(bundleID: self.app, isTerminalClass: false, elementToken: AXElementToken(1), accessibilityGranted: true,
+                                               elementHandle: AXElementHandle(NSObject()), focusOwnerBundleID: "com.other"))
+        }
+    }
+
     // MARK: empty recognition
 
     func test_emptySpeechLeavesOldTextAndEmitsNoOutcome() async {
