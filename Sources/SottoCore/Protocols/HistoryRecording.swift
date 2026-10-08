@@ -11,17 +11,8 @@ public protocol HistoryRecording: Sendable {
     /// the hotkey-down app. Secure fields are refused by the session regardless (both probes).
     func shouldRecord(context: TargetContext, pressApp: String?, settings: Settings) -> Bool
     func record(_ record: DictationRecord)
-    /// True when `pressApp` or `context` is an app the user excluded from remembering. Asked after
-    /// every landing, History on or off, because the engine's in-memory last landing (replace,
-    /// Copy Last) obeys the same exclusions. The default is false: a host with exclusions must
-    /// implement it.
-    func isExcluded(context: TargetContext, pressApp: String?, settings: Settings) -> Bool
     /// Only after an honoured ⌘Z (SPEC §9); `id` may name a record that was never written.
     func markScratched(_ id: UUID)
-}
-
-extension HistoryRecording {
-    public func isExcluded(context: TargetContext, pressApp: String?, settings: Settings) -> Bool { false }
 }
 
 /// `--dry-run` and tests that don't care: wants nothing, so the secure probe never runs.

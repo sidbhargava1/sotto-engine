@@ -35,7 +35,6 @@ public actor DictationSession {
     private let pressProbeDeadline: Duration
     private let sleep: Deadline.Sleeper  // injectable so the press-probe deadline is testable
     private let injectionLock = AsyncLock()
-    private let fieldAccess: (any FieldAccessing)?
 
     private var isRecording = false
     private var recordingSettings = Settings()
@@ -54,17 +53,9 @@ public actor DictationSession {
     private var handledEvents = 0
     private var drainWaiters: [CheckedContinuation<Void, Never>] = []
     private var lastInjection: LastInjection?
-    private var lastLandingState: LastLanding?
-    private var lastScratch: LastScratch?
-    private var landingEpoch = 0  // bumped by a host clear, so a landing in flight can't store afterwards
-    private var allowUnprovableReplace = false
-    private var recordingMode = PressMode.normal
-    private var replaceContinuations: [UUID: AsyncStream<ReplaceOutcome>.Continuation] = [:]
     private var idleSleepTask: Task<Void, Never>?
     private var audioAsleep = false
     private var sleeping: Task<Void, Never>?  // a press waits for it, so wake never precedes sleep
-
-    private enum PressMode { case normal, replaceLast }
 
     private struct LastInjection {
         let bundleID: String?
@@ -99,8 +90,7 @@ public actor DictationSession {
         livePartials: Bool = true,
         displayGate: @escaping @Sendable () async -> Bool = { true },
         logSubsystem: LogSubsystem = .engine,
-        voiceCommands: Bool = true,
-        fieldAccess: (any FieldAccessing)? = nil
+        voiceCommands: Bool = true
     ) {
         self.hotkey = hotkey
         self.audio = audio
@@ -127,47 +117,6 @@ public actor DictationSession {
         self.sleep = sleep
         self.log = logSubsystem.logger("session")
         self.voiceCommands = voiceCommands
-        self.fieldAccess = fieldAccess
-    }
-
-    // MARK: Replace last
-
-    /// The engine's memory of its last landing (read-only): nil before any landing, after a secure
-    /// field or excluded app, and after a host clear. Holds dictated text; never log it.
-    public var lastLanding: LastLanding? { lastLandingState }
-
-    /// Whether a replace may use undo-then-paste where the field can't be read back (Slack and other
-    /// Electron apps). Off by default; the host owns the decision. Read at landing.
-    public func setAllowUnprovableReplace(_ allowed: Bool) { allowUnprovableReplace = allowed }
-
-    /// Forget the last landing: call on screen lock, system sleep and quit. A landing that was in
-    /// flight when this ran is not stored either.
-    public func clearLastLanding(because reason: LastLandingClearReason) {
-        landingEpoch += 1
-        lastLandingState = nil
-        lastScratch = nil
-        log.info("last landing: cleared (\(reason.rawValue, privacy: .public))")
-    }
-
-    /// One value per replace-mode utterance that reached delivery, just before `.idle`. An empty or
-    /// failed recognition emits `.error` instead and touches nothing.
-    public func replaceOutcomes() -> AsyncStream<ReplaceOutcome> {
-        let id = UUID()
-        return AsyncStream { continuation in
-            replaceContinuations[id] = continuation
-            continuation.onTermination = { [weak self] _ in
-                Task { await self?.removeReplaceContinuation(id) }
-            }
-        }
-    }
-
-    private func removeReplaceContinuation(_ id: UUID) {
-        replaceContinuations[id] = nil
-    }
-
-    private func emitReplace(_ outcome: ReplaceOutcome) {
-        log.info("replace: outcome=\(String(describing: outcome), privacy: .public)")
-        for continuation in replaceContinuations.values { continuation.yield(outcome) }
     }
 
     public func start() {
@@ -264,27 +213,20 @@ public actor DictationSession {
     private func handle(_ event: HotkeyEvent) async {
         switch event {
         case .pressed: // Pause means "mic off until the next press" (ui-spec §2), so a press unpauses
-            await handlePressed(await unpausedSettings(), mode: .normal)
-        case .pressedReplacingLast:
-            await handlePressed(await unpausedSettings(), mode: .replaceLast)
+            var settings = await settingsStore.load()
+            if settings.paused {
+                settings.paused = false
+                await settingsStore.save(settings)
+            }
+            await handlePressed(settings)
         case .released: // not gated: pausing mid-hold must still end the recording
             await handleReleased()
         }
     }
 
-    private func unpausedSettings() async -> Settings {
-        var settings = await settingsStore.load()
-        if settings.paused {
-            settings.paused = false
-            await settingsStore.save(settings)
-        }
-        return settings
-    }
-
-    private func handlePressed(_ settings: Settings, mode: PressMode) async {
+    private func handlePressed(_ settings: Settings) async {
         guard !isRecording else { return } // DS-09: never double-start the one warm engine
         isRecording = true
-        recordingMode = mode
         recordingSettings = settings // WR-04: a mid-utterance toggle applies from the next press
         recordingGeneration += 1
         pressedAt = (now(), wallClock())
@@ -368,7 +310,6 @@ public actor DictationSession {
         let engine = utteranceEngine ?? transcriber
         utteranceEngine = nil
         let settings = recordingSettings
-        let mode = recordingMode
         let displays = recordingDisplays
         let releasedAt = now()
         let pressed = pressedAt ?? (releasedAt, wallClock())
@@ -387,7 +328,7 @@ public actor DictationSession {
             return
         }
         Task {
-            await self.processUtterance(buffer, engine: engine, settings: settings, mode: mode, displays: displays, clock: clock, pressApp: pressApp)
+            await self.processUtterance(buffer, engine: engine, settings: settings, displays: displays, clock: clock, pressApp: pressApp)
             self.utteranceFinished()
         }
     }
@@ -426,7 +367,7 @@ public actor DictationSession {
         if sleeping == task { sleeping = nil }
     }
 
-    private func processUtterance(_ buffer: AudioBuffer, engine: any Transcribing, settings: Settings, mode: PressMode, displays: Bool, clock: UtteranceClock, pressApp: Task<String?, Never>?) async {
+    private func processUtterance(_ buffer: AudioBuffer, engine: any Transcribing, settings: Settings, displays: Bool, clock: UtteranceClock, pressApp: Task<String?, Never>?) async {
         // No speech: say so plainly when the input itself delivered nothing (display only).
         let noSpeech: ErrorReason = buffer.silentInput.map { .silentInput(device: $0.device) } ?? .sttFailed
         guard !buffer.isEmpty else { // DS-03: silence/noise-only
@@ -465,7 +406,7 @@ public actor DictationSession {
         if probed == nil { log.info("press app: probe missed the \(String(describing: self.pressProbeDeadline), privacy: .public) deadline, unknown") }
         let pressAppID = probed ?? nil
         await injectionLock.runExclusive {
-            await self.deliverUtterance(rawTranscript: normalized, settings: settings, mode: mode, clock: clock, pressApp: pressAppID)
+            await self.deliverUtterance(rawTranscript: normalized, settings: settings, clock: clock, pressApp: pressAppID)
         }
     }
 
@@ -477,8 +418,7 @@ public actor DictationSession {
         return text
     }
 
-    private func deliverUtterance(rawTranscript: String, settings: Settings, mode: PressMode, clock: UtteranceClock, pressApp: String?) async {
-        let epoch = landingEpoch
+    private func deliverUtterance(rawTranscript: String, settings: Settings, clock: UtteranceClock, pressApp: String?) async {
         let command = voiceCommands ? CommandParser.parse(rawTranscript) : nil
         let words = CommandParser.wordCount(rawTranscript)
         if let command { // word count only: transcripts never reach the log
@@ -503,14 +443,9 @@ public actor DictationSession {
         let backend: any CleanupBackend = settings.usesModelCleanup ? cleanup : rawBackend
         let stream = Self.markingFirstToken(backend.clean(request), clock: clock, now: now)
 
-        // Replace mode after a successful scratch in this field has nothing to remove: a normal insert.
-        let replacing = mode == .replaceLast && !scratchClearedTarget(context, focusMoved: focusMoved, pressedAt: clock.pressedAt)
-        if mode == .replaceLast, !replacing { log.info("replace: normal insert after scratch") }
-
         let delivery: Delivery
-        if replacing {
-            delivery = await deliverReplace(rawTranscript: transcript, context: context, focusMoved: focusMoved, stream: stream, clock: clock)
-        } else if focusMoved || !context.hasEditableTarget { // DS-06: no target app, or focus moved off the press-time app before release -> clipboard
+        // DS-06: no target app, or focus moved off the press-time app before release -> clipboard
+        if focusMoved || !context.hasEditableTarget {
             let reason: DegradedReason = context.accessibilityGranted ? .copiedNoTarget : .copiedNoAX
             delivery = await deliverToClipboard(rawTranscript: transcript, reason: reason, stream: stream, clock: clock)
         } else if context.isTerminalClass || context.elementToken != nil {
@@ -522,14 +457,8 @@ public actor DictationSession {
         emit(.idle)
         let end = now()
         onTiming(clock.report(end: end, words: rawTranscript.split(whereSeparator: \.isWhitespace).count))
-        guard !delivery.noWrite else { return }
-        // After landing, on every landing, History on or off: the in-memory last landing obeys the
-        // same secure-field and exclusion rules. The release probe is trusted only when it ran.
-        let secureNow = if wantsRecord && release.isSecureInput { true } else { await contextProvider.isSecureNow(release) }
-        let excluded = history.isExcluded(context: release, pressApp: pressApp, settings: settings)
-        await storeLanding(delivery, rawText: transcript, context: context, secure: secureNow, excluded: excluded, epoch: epoch)
         if wantsRecord {
-            await recordIfAllowed(delivery, rawTranscript: rawTranscript, context: release, pressApp: pressApp, settings: settings, secureNow: secureNow, clock: clock, end: end)
+            await recordIfAllowed(delivery, rawTranscript: rawTranscript, context: release, pressApp: pressApp, settings: settings, clock: clock, end: end)
         }
     }
 
@@ -537,13 +466,12 @@ public actor DictationSession {
     /// spoken before the History answer is recorded (HI-05). The recorder's gate sees the raw
     /// release-time `context` and the press-time app, so an exclusion matching either blocks the
     /// row. A secure field never records, whatever the gate says: the release probe, then a second
-    /// one so a field that turned secure during cleanup counts too (HI-24). The second runs after
-    /// every landing (`secureNow`, shared with the last-landing memory) and is cheap (same element,
-    /// short timeout) because it holds `injectionLock`.
-    private func recordIfAllowed(_ delivery: Delivery, rawTranscript: String, context: TargetContext, pressApp: String?, settings: Settings, secureNow: Bool, clock: UtteranceClock, end: ContinuousClock.Instant) async {
+    /// one so a field that turned secure during cleanup counts too (HI-24). That one runs only when
+    /// the rest passed, and is cheap (same element, short timeout) because it holds `injectionLock`.
+    private func recordIfAllowed(_ delivery: Delivery, rawTranscript: String, context: TargetContext, pressApp: String?, settings: Settings, clock: UtteranceClock, end: ContinuousClock.Instant) async {
         guard !context.isSecureInput,
               history.shouldRecord(context: context, pressApp: pressApp, settings: settings),
-              !secureNow
+              !(await contextProvider.isSecureNow(context))
         else { return }
         let t = clock.rowTimings(end: end)
         let record = DictationRecord(
@@ -554,7 +482,6 @@ public actor DictationSession {
             sttMs: t.stt, cleanupMs: t.cleanup, landedMs: t.landed
         )
         lastInjection?.recordID = record.id  // every delivery path sets or clears lastInjection
-        lastLandingState?.recordID = record.id
         history.record(record)
     }
 
@@ -598,12 +525,11 @@ public actor DictationSession {
                     emit(.injecting)
                     let tidy = InjectionText.trimLineEnds(text)
                     let sanitized = context.isTerminalClass ? InjectionText.sanitizeForTerminal(tidy) : tidy
-                    await noteStart(&written, context: context, overrides: overrides)
                     let (outcome, used) = await injectWithFallback(sanitized, to: context, overrides: overrides)
                     switch outcome {
                     case .success, .unverified: // DS-05: unverified is distinct from failed — no paste fallback, just mark it
                         typed += text
-                        written.add(sanitized, via: used, outcome: outcome)
+                        written.add(sanitized, via: used)
                         if outcome == .unverified { unverified = true }
                         clock.markInjected(now())
                     case .failed:
@@ -635,38 +561,19 @@ public actor DictationSession {
     private struct Written {
         var text = ""
         var kind: DeliveryKind
-        var writes = 0
-        var allVerified = true  // every write was an AX `.success`
-        var start: FieldRange?  // the caret before the first write, read only for an AX landing
-        var startRead = false
         private var landedOnce = false
 
         init(kind: DeliveryKind) { self.kind = kind }
 
-        mutating func add(_ chunk: String, via strategy: InjectionStrategy, outcome: InjectionOutcome) {
+        mutating func add(_ chunk: String, via strategy: InjectionStrategy) {
             text += chunk
             if !landedOnce { kind = DeliveryKind(strategy) } // the first strategy that landed
             landedOnce = true
-            writes += 1
-            if strategy != .axSelectedText || outcome != .success { allVerified = false }
         }
 
         func delivery(_ degraded: DegradedReason?) -> Delivery {
-            Delivery(landedText: text, strategy: kind, degraded: degraded, writes: writes, verified: writes > 0 && allVerified, start: start)
+            Delivery(landedText: text, strategy: kind, degraded: degraded)
         }
-    }
-
-    /// Reads the caret before the first write: the inserted range can't be recovered afterwards. One
-    /// AX read, only when the write will go through Accessibility into a non-terminal field.
-    private func noteStart(_ written: inout Written, context: TargetContext, overrides: [String: InjectionStrategy]) async {
-        guard !written.startRead else { return }
-        written.startRead = true
-        guard let fieldAccess, !context.isTerminalClass, context.elementHandle != nil,
-              injectionPolicy.strategy(for: context, overrides: overrides) == .axSelectedText,
-              injectors.injector(for: .axSelectedText) != nil
-        else { return }
-        // A replaced selection can't be proven by a count delta, so only an empty selection counts.
-        if let selection = await fieldAccess.selectedRange(context), selection.length == 0 { written.start = selection }
     }
 
     private func finishWithRaw(rawTranscript: String, typed: String, written: Written, undelivered: String?, context: TargetContext, overrides: [String: InjectionStrategy], clock: UtteranceClock) async -> Delivery {
@@ -676,7 +583,6 @@ public actor DictationSession {
         }
         let remainder = RawRemainder.after(produced: typed, raw: rawTranscript)
         var written = written
-        await noteStart(&written, context: context, overrides: overrides)
         if await injectRemainder(remainder, context: context, overrides: overrides, into: &written) {
             clock.markInjected(now())
             emit(.degraded(.rawTyped))
@@ -697,9 +603,8 @@ public actor DictationSession {
     }
 
     /// Collects the whole stream for one-shot delivery, repairing it with raw text on failure.
-    /// `fellBack` is true when raw text had to stand in for (part of) the cleanup; `truncated` when
-    /// the output cap cut it (LB-06).
-    private func collect(_ stream: AsyncThrowingStream<String, Error>, rawTranscript: String) async -> (text: String, fellBack: Bool, truncated: Bool) {
+    /// `fellBack` is true when raw text had to stand in for (part of) the cleanup.
+    private func collect(_ stream: AsyncThrowingStream<String, Error>, rawTranscript: String) async -> (text: String, fellBack: Bool) {
         var text = ""
         var stalled = false
         do {
@@ -712,18 +617,18 @@ public actor DictationSession {
                 }
             }
         } catch CleanupError.outputCapReached {
-            return (text, false, true) // LB-06
+            return (text, false) // LB-06
         } catch {
             stalled = true
         }
-        if stalled { return (text + RawRemainder.after(produced: text, raw: rawTranscript), true, false) }
-        if text.allSatisfy(\.isWhitespace) { return (rawTranscript, true, false) } // LB-05
-        return (InjectionText.trimLineEnds(text), false, false)
+        if stalled { return (text + RawRemainder.after(produced: text, raw: rawTranscript), true) }
+        if text.allSatisfy(\.isWhitespace) { return (rawTranscript, true) } // LB-05
+        return (InjectionText.trimLineEnds(text), false)
     }
 
     private func deliverPasteAndKeep(rawTranscript: String, context: TargetContext, stream: AsyncThrowingStream<String, Error>, clock: UtteranceClock) async -> Delivery {
         emit(.cleaning)
-        let (text, _, _) = await collect(stream, rawTranscript: rawTranscript)
+        let (text, _) = await collect(stream, rawTranscript: rawTranscript)
         lastInjection = nil // no element to guard a ⌘Z against
         let reason: DegradedReason = context.accessibilityGranted ? .copiedNoTarget : .copiedNoAX
         // A host chain without paste gets the clipboard alone, as without Accessibility.
@@ -736,13 +641,13 @@ public actor DictationSession {
         _ = await paste.append(text, to: context)
         clock.markInjected(now())
         emit(.degraded(reason))
-        return Delivery(landedText: text, strategy: .paste, degraded: reason, writes: 1)
+        return Delivery(landedText: text, strategy: .paste, degraded: reason)
     }
 
     private func deliverToClipboard(rawTranscript: String, reason: DegradedReason, stream: AsyncThrowingStream<String, Error>, clock: UtteranceClock) async -> Delivery {
         lastInjection = nil // nothing typed this time, so an older injection is no longer "the last"
         emit(.cleaning)
-        let (text, fellBack, _) = await collect(stream, rawTranscript: rawTranscript)
+        let (text, fellBack) = await collect(stream, rawTranscript: rawTranscript)
         await clipboard.copy(text)
         clock.markLanded(now())
         let degraded: DegradedReason = fellBack ? .rawTyped : reason
@@ -756,7 +661,7 @@ public actor DictationSession {
         let sanitized = context.isTerminalClass ? InjectionText.sanitizeForTerminal(remainder) : remainder
         let (outcome, used) = await injectWithFallback(sanitized, to: context, overrides: overrides)
         guard outcome != .failed else { return false }
-        written.add(sanitized, via: used, outcome: outcome)
+        written.add(sanitized, via: used)
         return true
     }
 
@@ -776,95 +681,6 @@ public actor DictationSession {
         lastInjection = LastInjection(bundleID: context.bundleID, elementToken: context.elementToken, isTerminalClass: context.isTerminalClass, at: now())
     }
 
-    private func noteScratch(_ context: TargetContext) {
-        lastScratch = LastScratch(bundleID: context.bundleID, elementToken: context.elementToken, at: now())
-        lastLandingState?.scratched = true  // Copy Last keeps the text; replace no longer applies to it
-    }
-
-    /// True when a successful scratch in this same field, under 30s before the press, left nothing to
-    /// replace: replace mode then types normally (same identity rule as scratch itself).
-    private func scratchClearedTarget(_ context: TargetContext, focusMoved: Bool, pressedAt: ContinuousClock.Instant) -> Bool {
-        guard let scratch = lastScratch, !focusMoved, !context.isTerminalClass,
-              let bundleID = scratch.bundleID, context.bundleID == bundleID,
-              let element = scratch.elementToken, context.elementToken == element
-        else { return false }
-        return scratch.at.duration(to: pressedAt) < ReplaceLast.window
-    }
-
-    /// Replace mode at landing, under `injectionLock`: the whole replacement is collected first (it
-    /// is written once, or not at all), then the guard runs against the landing as it stands now.
-    /// Any refusal leaves the old text byte-identical and puts the new text on the clipboard.
-    private func deliverReplace(rawTranscript: String, context: TargetContext, focusMoved: Bool, stream: AsyncThrowingStream<String, Error>, clock: UtteranceClock) async -> Delivery {
-        emit(.cleaning)
-        let (text, fellBack, truncated) = await collect(stream, rawTranscript: rawTranscript)
-        emit(.injecting)
-        let rec = lastLandingState
-        let result: ReplaceResult
-        if let refusal = ReplaceLast.screen(rec, context: context, focusMoved: focusMoved, pressedAt: clock.pressedAt) {
-            result = .refused(refusal)
-        } else if let rec {
-            let replace = ReplaceLast(fields: fieldAccess, paste: injectors.injector(for: .paste), undo: undo, allowUnprovable: allowUnprovableReplace)
-            result = await replace.run(text, over: rec, context: context)
-        } else {
-            result = .refused(.nothingToReplace)
-        }
-        lastInjection = nil // scratch that after a replace would undo only half of it; refuse instead
-        let degraded: DegradedReason? = truncated ? .cleanupTruncated : fellBack ? .rawTyped : nil
-        switch result {
-        case .replaced(let method, let fieldCount):
-            clock.markInjected(now())
-            if let degraded { emit(.degraded(degraded)) }
-            emitReplace(.replaced(method))
-            var delivery = Delivery(landedText: text, strategy: method == .paste ? .paste : .ax, degraded: degraded, writes: 1)
-            if method == .axVerified, let start = rec?.insertedRange {
-                delivery.verified = true
-                delivery.start = FieldRange(location: start.location, length: 0)
-                delivery.fieldCount = fieldCount
-            }
-            return delivery
-        case .sameAsBefore:
-            emitReplace(.sameAsBefore)
-            var delivery = Delivery(landedText: text, strategy: rec?.strategy ?? .clipboard, degraded: nil)
-            delivery.noWrite = true
-            return delivery
-        case .refused, .unconfirmed:
-            await clipboard.copy(text)
-            clock.markLanded(now())
-            let reason: DegradedReason = context.accessibilityGranted ? .copiedNoTarget : .copiedNoAX
-            emit(.degraded(fellBack ? .rawTyped : reason))
-            if case .refused(let why) = result { emitReplace(.refused(why)) } else { emitReplace(.unconfirmed) }
-            return Delivery(landedText: text, strategy: .clipboard, degraded: fellBack ? .rawTyped : reason)
-        }
-    }
-
-    /// Remembers this landing for replace, the tap and Copy Last, unless it was in a secure field or
-    /// an excluded app. Logs, for every landing, the replace path it would take (no text), so the
-    /// paste-path question can be answered from real use.
-    private func storeLanding(_ delivery: Delivery, rawText: String, context: TargetContext, secure: Bool, excluded: Bool, epoch: Int) async {
-        lastScratch = nil // any landing supersedes a scratch
-        guard epoch == landingEpoch else { return }
-        guard !secure, !excluded else {
-            lastLandingState = nil
-            log.info("replace: would=refuse(nothingToReplace) reason=\(secure ? "secure" : "excluded", privacy: .public)")
-            return
-        }
-        var range: FieldRange?
-        var count = delivery.fieldCount
-        if delivery.strategy == .ax, let start = delivery.start {
-            range = FieldRange(location: start.location, length: delivery.landedText.utf16.count)
-            if count == nil, delivery.verified, let fieldAccess { count = await fieldAccess.characterCount(context) }
-            guard epoch == landingEpoch else { return }
-        }
-        let verified = delivery.strategy == .ax && delivery.verified && range != nil && count != nil
-        let rec = LastLanding(
-            bundleID: context.bundleID, elementToken: context.elementToken, isTerminalClass: context.isTerminalClass,
-            strategy: delivery.strategy, verified: verified, insertedRange: range, fieldCount: count,
-            landedText: delivery.landedText, rawText: rawText, at: now(), date: wallClock(), writes: delivery.writes
-        )
-        lastLandingState = rec
-        log.info("replace: would=\(rec.replacePath.logName, privacy: .public) strategy=\(rec.strategy.rawValue, privacy: .public) writes=\(rec.writes, privacy: .public) verified=\(rec.verified, privacy: .public) unprovableAllowed=\(self.allowUnprovableReplace, privacy: .public)")
-    }
-
     private func handleCommand(_ command: Command, pressApp: String?) async {
         switch command {
         case .scratchThat:
@@ -882,7 +698,6 @@ public actor DictationSession {
             }
             lastInjection = nil // DS-14b: one ⌘Z per injection; a second would undo the user's own text
             let ok = await undo.undo(context)
-            if ok { noteScratch(context) }
             if ok, let id = last.recordID { history.markScratched(id) } // HI-29: only an honoured ⌘Z
             emit(ok ? .undone : .error(.undoRefused))
         }
