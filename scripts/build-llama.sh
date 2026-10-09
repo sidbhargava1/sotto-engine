@@ -7,8 +7,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-LLAMA_TAG=v0.5.0
-LLAMA_COMMIT=7fe450e19305b828c199d602c23a8337aaa1f03b  # Phase 0 measured 86a24a1 (b11199, 0.5.0-dev)
+LLAMA_TAG=b11514
+LLAMA_COMMIT=de7fa0a3c6a2e1b4cd9f22eb8d6bf5b12dbdb63b  # was v0.5.0 7fe450e (b11146)
 SRC=Vendor/llama.cpp-src
 OUT=Vendor/llama.xcframework
 

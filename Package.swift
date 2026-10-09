@@ -11,8 +11,8 @@ import PackageDescription
 // the package by URL gets the release asset. SOTTO_LLAMA_LOCAL=1 forces the path target; use it
 // after building Vendor in a checkout that already resolved the asset (SwiftPM caches this manifest).
 // scripts/package-llama.sh rewrites these two lines; the zip it makes is uploaded to that release.
-let llamaRelease = "0.1.0"
-let llamaChecksum = "a8562ae7a8b1f9469546500c76e5d2b602ba9484abb86e15fcea369bf581a157"  // llama.cpp 7fe450e19305b828c199d602c23a8337aaa1f03b
+let llamaRelease = "0.3.0"
+let llamaChecksum = "506de7066d7fb19e3478e071652c15bf363ad6ba8fab279bf05adb48b9745bde"  // llama.cpp de7fa0a3c6a2e1b4cd9f22eb8d6bf5b12dbdb63b
 
 let llamaIsLocal = Context.environment["SOTTO_LLAMA_LOCAL"] == "1"
     || FileManager.default.fileExists(atPath: Context.packageDirectory + "/Vendor/llama.xcframework")
