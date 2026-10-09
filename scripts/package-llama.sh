@@ -22,6 +22,8 @@ HAVE="$(cat "$FW.commit" 2>/dev/null || true)"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 cp -R "$FW" "$STAGE/"
+# MIT requires the notice to travel with the binary.
+cp Vendor/llama.cpp-src/LICENSE "$STAGE/llama.xcframework/LICENSE.llama.cpp" || { echo "llama.cpp LICENSE missing" >&2; exit 1; }
 find "$STAGE/llama.xcframework" -exec touch -h -t 200001010000 {} +
 mkdir -p build
 rm -f "$OUT"

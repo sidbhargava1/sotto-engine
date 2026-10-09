@@ -38,7 +38,7 @@ Logs carry word counts and timings, never text. There is no history store; the s
 ## Install
 
 ```swift
-.package(url: "https://github.com/sidbhargava1/sotto-engine", .upToNextMinor(from: "0.1.0")),
+.package(url: "https://github.com/sidbhargava1/sotto-engine", .upToNextMinor(from: "0.3.0")),
 ```
 
 Then depend on `SottoCore` (pure logic and protocols) and `SottoEngine` (the macOS adapters). llama.cpp ships as a prebuilt `llama.xcframework` attached to each release, which SwiftPM fetches and verifies by checksum; you don't need cmake. To build it from source instead, run `scripts/build-llama.sh` in a checkout: a `Vendor/llama.xcframework` there takes precedence.
