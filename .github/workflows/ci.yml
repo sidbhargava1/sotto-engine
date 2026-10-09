@@ -27,7 +27,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: xcodebuild -version && swift --version
-      # No Vendor/ here, so `llama` is the release asset, fetched and checksummed by SwiftPM.
+      # `llama` links the framework built here from the pinned llama.cpp (Vendor/, ~4 min, cached on the
+      # script): the release asset named in Package.swift only exists once that engine version is published.
+      - uses: actions/cache@v6
+        id: llama
+        with:
+          path: Vendor
+          key: llama-${{ runner.os }}-${{ runner.arch }}-xcode26.3-${{ hashFiles('scripts/build-llama.sh') }}
+      - if: steps.llama.outputs.cache-hit != 'true'
+        run: scripts/build-llama.sh
       - uses: actions/cache@v6
         with:
           path: .build
