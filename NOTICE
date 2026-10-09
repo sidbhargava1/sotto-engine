@@ -11,6 +11,9 @@ Licensed under the MIT License.
 https://github.com/ggml-org/llama.cpp
 ggml also includes llamafile sgemm (Copyright 2024 Mozilla Foundation, MIT)
 and YaRN RoPE scaling (Copyright (c) 2023 Jeffrey Quesnelle and Bowen Peng, MIT).
+The llama.cpp build also links stb_image (Sean Barrett, public domain or MIT) and
+miniaudio (David Reid, public domain or MIT-0) through its multimodal library.
+llama.cpp's own LICENSE ships inside llama.xcframework.zip.
 
 FluidAudio
 Copyright the FluidInference Team.

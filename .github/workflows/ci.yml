@@ -39,8 +39,8 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: .build
-          key: spm-${{ runner.os }}-${{ runner.arch }}-xcode26.3-${{ hashFiles('Package.resolved', 'Package.swift') }}
-          restore-keys: spm-${{ runner.os }}-${{ runner.arch }}-xcode26.3-
+          key: spm-vendor-${{ runner.os }}-${{ runner.arch }}-xcode26.3-${{ hashFiles('Package.resolved', 'Package.swift') }}
+          restore-keys: spm-vendor-${{ runner.os }}-${{ runner.arch }}-xcode26.3-
       - run: swift build
       # SottoCore (pure, fakes), SottoEngine adapters, and the CLI. No weights, devices or permissions.
       - run: swift test
