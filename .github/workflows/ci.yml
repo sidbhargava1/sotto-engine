@@ -27,20 +27,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: xcodebuild -version && swift --version
-      # `llama` links the framework built here from the pinned llama.cpp (Vendor/, ~4 min, cached on the
-      # script): the release asset named in Package.swift only exists once that engine version is published.
-      - uses: actions/cache@v6
-        id: llama
-        with:
-          path: Vendor
-          key: llama-${{ runner.os }}-${{ runner.arch }}-xcode26.3-${{ hashFiles('scripts/build-llama.sh') }}
-      - if: steps.llama.outputs.cache-hit != 'true'
-        run: scripts/build-llama.sh
+      # No Vendor/ here, so `llama` is the release asset, fetched and checksummed by SwiftPM.
       - uses: actions/cache@v6
         with:
           path: .build
-          key: spm-vendor-${{ runner.os }}-${{ runner.arch }}-xcode26.3-${{ hashFiles('Package.resolved', 'Package.swift') }}
-          restore-keys: spm-vendor-${{ runner.os }}-${{ runner.arch }}-xcode26.3-
+          key: spm-asset-${{ runner.os }}-${{ runner.arch }}-xcode26.3-${{ hashFiles('Package.resolved', 'Package.swift') }}
+          restore-keys: spm-asset-${{ runner.os }}-${{ runner.arch }}-xcode26.3-
       - run: swift build
       # SottoCore (pure, fakes), SottoEngine adapters, and the CLI. No weights, devices or permissions.
       - run: swift test

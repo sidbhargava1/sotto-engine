@@ -253,9 +253,10 @@ final class PartialsSessionTests: SessionTestCase {
     /// RESULTS.md "Frame budget": with a partial holding the (fake) ANE at release, release→sttDone
     /// stays near the no-partials baseline because the partial is cancelled first. The regression
     /// (partial not cancelled) holds the ANE ~300 ms longer, several times the ~40 ms baseline, so
-    /// the always-on bound is relative (≤ 1.5× baseline): it scales with a slow shared runner, where
-    /// an absolute 10 ms failed on scheduling noise (0.092 s vs 0.073 s). The 10 ms budget itself is
-    /// still checked off CI.
+    /// the always-on bound is the median overshoot against 50 ms or half the baseline, whichever is
+    /// larger: a shared runner adds tens of ms of scheduling noise (1.5× alone failed at 77 vs 75 ms
+    /// on a 50 ms baseline), while the regression adds ~300 ms, six times the slack. The 10 ms
+    /// budget itself is still checked off CI.
     func test_releaseWithPartialInFlight_staysWithinBudget() async throws {
         func releaseToSTT(partials: Bool) async throws -> Duration {
             let events = EventLog<String>()
@@ -285,13 +286,13 @@ final class PartialsSessionTests: SessionTestCase {
         _ = try await releaseToSTT(partials: false) // warm-up: first-run costs land in neither series
         _ = try await releaseToSTT(partials: true)
         var baseline: [Duration] = [], withPartial: [Duration] = []
-        for _ in 0..<7 { // interleaved, so a burst of load hits both series
+        for _ in 0..<11 { // interleaved, so a burst of load hits both series
             baseline.append(try await releaseToSTT(partials: false))
             withPartial.append(try await releaseToSTT(partials: true))
         }
-        let base = baseline.sorted()[3], partial = withPartial.sorted()[3]
+        let base = baseline.sorted()[5], partial = withPartial.sorted()[5]
         let detail = "median release→sttDone \(partial) vs baseline \(base)"
-        XCTAssertLessThanOrEqual(partial, base * 1.5, detail)
+        XCTAssertLessThanOrEqual(partial - base, max(base / 2, .milliseconds(50)), detail)
         if ProcessInfo.processInfo.environment["CI"] == nil {
             XCTAssertLessThan(partial - base, .milliseconds(10), detail)
         }
