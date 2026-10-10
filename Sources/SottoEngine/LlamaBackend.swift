@@ -47,13 +47,14 @@ public enum LlamaBackend {
 
 final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
     enum Failure: Error, CustomStringConvertible {
-        case loadModel(String), createContext, tokenize, decode(Int32)
+        case loadModel(String), createContext, tokenize, decode(Int32), kvRemove
         var description: String {
             switch self {
             case .loadModel(let path): "could not load \(path)"
             case .createContext: "could not create context"
             case .tokenize: "tokenize failed"
             case .decode(let code): "llama_decode returned \(code)"
+            case .kvRemove: "llama_memory_seq_rm refused a partial removal"
             }
         }
     }
@@ -84,6 +85,8 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
     private(set) var draftedTokens = 0, acceptedTokens = 0, speculativeSteps = 0
     /// Tests force drafts to exercise rejection at chosen positions; nil in production.
     var draftOverride: (([Int32]) -> [Int32])?
+    /// Tests stub the KV tail removal (from a position) to return false; nil in production.
+    var removeKV: ((Int32) -> Bool)?
 
     private static let backendInit: Void = {
         llama_log_set({ level, text, _ in
@@ -97,6 +100,11 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
         self.modelURL = modelURL
         self.contextSize = contextSize
         self.speculation = speculation
+    }
+
+    /// Recurrent and hybrid memories can't drop part of a sequence, so rejected draft cells could not be removed.
+    func applyMemoryKind(recurrent: Bool, hybrid: Bool) {
+        if recurrent || hybrid { speculation.enabled = false }
     }
 
     var speculationHeadroom: Int { speculation.headroom }
@@ -137,6 +145,7 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
         llama_sampler_chain_add(chain, llama_sampler_init_greedy())  // temperature 0
         sampler = chain
         if !samplerIsStatelessGreedy { speculation.enabled = false }
+        applyMemoryKind(recurrent: llama_model_is_recurrent(model), hybrid: llama_model_is_hybrid(model))
     }
 
     func tokenize(_ segments: [PromptSegment]) throws -> [Int32] {
@@ -227,7 +236,11 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
             sample: { llama_sampler_sample(sampler, context, Int32($0)) },
             isEnd: { llama_vocab_is_eog(vocab, $0) })
         livePosition += 1 + r.accepted
-        if r.accepted < draft.count { llama_memory_seq_rm(llama_get_memory(context), liveSeq, Int32(livePosition), -1) }
+        if r.accepted < draft.count {
+            // Recurrent/hybrid memory refuses a partial removal; stale draft cells would silently skew the output.
+            let removed = removeKV?(Int32(livePosition)) ?? llama_memory_seq_rm(llama_get_memory(context), liveSeq, Int32(livePosition), -1)
+            guard removed else { speculation.enabled = false; throw Failure.kvRemove }
+        }
         speculativeSteps += 1
         draftedTokens += draft.count
         acceptedTokens += r.accepted

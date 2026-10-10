@@ -208,4 +208,50 @@ final class CopyAheadModelTests: XCTestCase {
             }
         }
     }
+
+    func test_recurrentOrHybridMemoryDisablesSpeculation() throws {
+        let engine = try loaded(); defer { engine.unload() }
+        XCTAssertTrue(engine.speculation.enabled)  // the test model has attention-only memory
+        engine.applyMemoryKind(recurrent: true, hybrid: false)
+        XCTAssertFalse(engine.speculation.enabled)
+        engine.speculation.enabled = true
+        engine.applyMemoryKind(recurrent: false, hybrid: true)
+        XCTAssertFalse(engine.speculation.enabled)
+        engine.speculation.enabled = true
+        engine.applyMemoryKind(recurrent: false, hybrid: false)
+        XCTAssertTrue(engine.speculation.enabled)
+    }
+
+    /// A refused partial removal must fail the request, not leave rejected cells in the KV.
+    func test_refusedKVRemovalThrows() throws {
+        let engine = try loaded(); defer { engine.unload() }
+        _ = try prime(engine, Self.builtIn[1])
+        engine.draftOverride = { _ in [1, 2, 3] }  // wrong on purpose: guarantees a rejection
+        engine.removeKV = { _ in false }
+        XCTAssertThrowsError(try { while try engine.sampleNext() != nil {} }())
+        XCTAssertFalse(engine.speculation.enabled, "speculation turns itself off after the failure")
+    }
+
+    /// The output cap lands on the same text with speculation on and off.
+    func test_outputCapGivesTheSameTextOnAndOff() async throws {
+        let engine = LlamaEngine(modelURL: try XCTUnwrap(Self.model), contextSize: 3072)
+        let backend = ModelCleanupBackend(engine: engine) { _ in }
+        try await backend.load(dictionary: ["Sotto"])
+        func capped(_ text: String, max: Int) async -> (String, Bool) {
+            var out = "", hitCap = false
+            do {
+                for try await piece in backend.generate(system: "You repeat the user's text with punctuation fixed.", user: text, maxTokens: max) { out += piece }
+            } catch CleanupError.outputCapReached { hitCap = true } catch { out += "[\(error)]" }
+            return (out, hitCap)
+        }
+        for cap in [5, 6, 7, 13] {
+            engine.speculation.enabled = false
+            let off = await capped(Self.builtIn[1], max: cap)
+            engine.speculation.enabled = true
+            let on = await capped(Self.builtIn[1], max: cap)
+            XCTAssertEqual(on.0, off.0, "cap \(cap)")
+            XCTAssertEqual(on.1, off.1, "cap \(cap)")
+            XCTAssertTrue(off.1, "cap \(cap) should have been reached")
+        }
+    }
 }

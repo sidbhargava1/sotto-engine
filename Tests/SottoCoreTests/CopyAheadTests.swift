@@ -30,6 +30,13 @@ final class CopyAheadTests: XCTestCase {
         XCTAssertEqual(d, [8, 9])
     }
 
+    func test_draftFallsBackToAnEarlierMatchWhenNothingLiesAhead() {
+        var cursor = 8
+        let d = CopyAhead.draft(source: [1, 2, 3, 4, 0, 0, 0, 0, 5, 5, 5], generated: [1, 2], settings: settings(length: 2), cursor: &cursor)
+        XCTAssertEqual(d, [3, 4])
+        XCTAssertEqual(cursor, 2)
+    }
+
     func test_draftIsCappedAtLengthAndAtTheEndOfTheSource() {
         var cursor = 0
         XCTAssertEqual(CopyAhead.draft(source: [1, 2, 3, 4, 5], generated: [1, 2], settings: settings(length: 2), cursor: &cursor), [3, 4])

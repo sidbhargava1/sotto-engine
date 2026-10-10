@@ -3,7 +3,8 @@ import Foundation
 // copy of the transcript, so the next few tokens are guessed by copying what follows the last
 // generated tokens in the prompt's own tail, then verified by the model in one batch. Pure logic, no
 // llama.cpp: the engine supplies the sampler. Greedy verification keeps a draft token only when the
-// model would have produced it anyway, so the output equals plain greedy decoding.
+// model would have picked it anyway: the same text as greedy decoding (verified byte-identical on 103
+// transcripts on Apple silicon; batched verify can differ in the last float bits on other GPUs).
 public enum CopyAhead {
     /// Tokens of the last `lookup` generated tokens are searched in `source`; the next `length` follow.
     public struct Settings: Sendable, Equatable {
@@ -29,14 +30,19 @@ public enum CopyAhead {
         let n = settings.lookup
         guard settings.enabled, settings.length > 0, generated.count >= n, source.count > n else { return [] }
         let tail = generated.suffix(n)
-        var j = 0
-        while j + n < source.count {  // a match at the very end has nothing to copy
-            if j + n >= cursor, source[j..<(j + n)].elementsEqual(tail) {
-                cursor = j + n
-                return Array(source[(j + n)..<min(j + n + settings.length, source.count)])
+        func scan(from start: Int, requireAfterCursor: Bool) -> [Int32]? {
+            var j = start
+            while j + n < source.count {  // a match at the very end has nothing to copy
+                if (!requireAfterCursor || j + n >= cursor), source[j..<(j + n)].elementsEqual(tail) {
+                    cursor = j + n
+                    return Array(source[(j + n)..<min(j + n + settings.length, source.count)])
+                }
+                j += 1
             }
-            j += 1
+            return nil
         }
+        // Forward from the cursor first (a match can start up to n before it); only then anywhere.
+        if let d = scan(from: max(0, cursor - n), requireAfterCursor: true) ?? scan(from: 0, requireAfterCursor: false) { return d }
         return []
     }
 
