@@ -30,6 +30,9 @@ public protocol LanguageModelEngine: AnyObject, Sendable {
     func commitStagedPrefix()
     /// Drops the staged sequence; the live one is untouched. No-op when nothing is staged.
     func discardStagedPrefix()
+    /// KV cells beyond the tokens it returns that one `sampleNext` may touch (a speculative verify
+    /// batch). The backend keeps its context checks this far from the limit. 0 when the engine decodes one token at a time.
+    var speculationHeadroom: Int { get }
 }
 
 extension LanguageModelEngine {
@@ -38,4 +41,5 @@ extension LanguageModelEngine {
     public func stagePrefill(_ tokens: [Int32], at position: Int) throws {}
     public func commitStagedPrefix() {}
     public func discardStagedPrefix() {}
+    public var speculationHeadroom: Int { 0 }
 }

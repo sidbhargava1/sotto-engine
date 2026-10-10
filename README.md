@@ -132,6 +132,10 @@ sotto transcribe memo.wav --raw       # skip the cleanup model; print the transc
 
 Text goes to stdout and status to stderr, so `sotto dictate | pbcopy` works. The CLI never downloads on its own: add `--download` the first time to fetch the models into `~/Library/Application Support/sotto-engine/Models/`. Exit codes follow sysexits (64 usage, 66 bad input, 69 model missing, 77 microphone denied; 1 when nothing was recognised). Full reference: [CLI.md](CLI.md).
 
+## Copy-ahead decoding
+
+Cleanup output is nearly a copy of the transcript, so `LlamaEngine` guesses the next few tokens by copying from the prompt and has the model verify them in one batch (greedy, so the text is exactly what one-token-at-a-time decoding gives). It needs llama.cpp b11404 or later and is on by default. Turn it off without a rebuild with `SOTTO_SPECULATION=0` in the environment, or `LlamaBackend.make(..., speculation: false)`.
+
 ## Relationship to the Sotto app
 
 The Sotto app is built on this engine. The app adds onboarding, the menu bar and indicator, history, Insights and its voice profile; it doesn't get a better engine. Every improvement to transcription, cleanup, the dictionary, commands or injection lands here first.
