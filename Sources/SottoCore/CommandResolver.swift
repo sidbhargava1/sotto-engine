@@ -106,13 +106,18 @@ public enum CommandResolver {
         }
     }
 
-    /// Letters and digits only, lowercased: "x code", "X-Code" and "Xcode" all compare equal.
+    /// Case and diacritics folded (so NFC and NFD agree), then letters and digits only: "x code",
+    /// "X-Code" and "Xcode" compare equal, and so do "Café" and "cafe".
     static func key(_ s: String) -> String {
-        String(String.UnicodeScalarView(s.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }))
+        String(String.UnicodeScalarView(fold(s).unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }))
+    }
+
+    private static func fold(_ s: String) -> String {
+        s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
     }
 
     private static func nameWords(_ s: String) -> [String] {
-        s.lowercased().split(whereSeparator: { !$0.unicodeScalars.allSatisfy(CharacterSet.alphanumerics.contains) })
+        fold(s).split(whereSeparator: { !$0.unicodeScalars.allSatisfy(CharacterSet.alphanumerics.contains) })
             .map(String.init)
     }
 

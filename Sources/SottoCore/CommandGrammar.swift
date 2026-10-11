@@ -42,8 +42,15 @@ public enum CommandGrammar {
         let key: String   // lowercased
     }
 
+    /// Bounds on what is examined, so a pasted wall of text costs a fixed amount of work. A real
+    /// command is a few words; anything past the cap is already "too long" or not a command.
+    static let maxScannedCharacters = 2_000
+    static let maxScannedWords = 32
+    /// A "word" longer than this is not a name anyone spoke; never echoed back in a message.
+    static let maxWordLength = 64
+
     static func words(_ raw: String) -> [Word] {
-        raw.split(whereSeparator: \.isWhitespace).compactMap { token in
+        raw.prefix(maxScannedCharacters).split(whereSeparator: \.isWhitespace).prefix(maxScannedWords).compactMap { token in
             let text = String(String.UnicodeScalarView(
                 token.unicodeScalars.filter { !CharacterSet.punctuationCharacters.contains($0) }))
             return text.isEmpty ? nil : Word(text: text, key: text.lowercased())
@@ -116,7 +123,9 @@ public enum CommandGrammar {
         }
         guard !target.isEmpty else { return .noObject }
         if deictics.contains(target.map(\.key).joined(separator: " ")) { return .deictic }
-        guard target.count <= maxTargetWords else { return .tooLong }
+        guard target.count <= maxTargetWords, target.allSatisfy({ $0.text.count <= maxWordLength }) else {
+            return .tooLong
+        }
         return .command(ParsedCommand(
             verb: verb, forcedKind: forced, target: target.map(\.text).joined(separator: " ")))
     }
