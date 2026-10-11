@@ -38,7 +38,7 @@ Logs carry word counts and timings, never text. There is no history store; the s
 ## Install
 
 ```swift
-.package(url: "https://github.com/sidbhargava1/sotto-engine", .upToNextMinor(from: "0.3.0")),
+.package(url: "https://github.com/sidbhargava1/sotto-engine", .upToNextMinor(from: "0.4.0")),
 ```
 
 Then depend on `SottoCore` (pure logic and protocols) and `SottoEngine` (the macOS adapters). llama.cpp ships as a prebuilt `llama.xcframework` attached to each release, which SwiftPM fetches and verifies by checksum; you don't need cmake. To build it from source instead, run `scripts/build-llama.sh` in a checkout: a `Vendor/llama.xcframework` there takes precedence.
@@ -164,16 +164,22 @@ case .scratchThat, .dictation, .command, .commandError: break
 DictationSession(
     ...,
     commandInputs: { CommandInputs(commandsEnabled: true, prefixEnabled: true) },  // read at each press
-    commandCatalog: { await myCatalog() },                                          // read when a command resolves
+    commandCatalog: { await myCatalog() },                                          // read when a command resolves; return a cached snapshot
     commandExecutor: myExecutor)                                                    // your CommandExecuting
 for await phase in await session.commandPhaseUpdates() { ... }                     // drives the indicator
 ```
 
 - A command press never asks the display gate, never computes partials, stops at 15 s (`maxCommandRecordingDuration`, dictation stays at 60 s) and continues like a release. After speech-to-text the transcript goes through your dictionary's heard-as rewrite (or `commandRewrite:`), then the router, then your executor. It never calls cleanup, injects, sends a key, touches the pasteboard or writes History, so it works with cleanup missing or failed.
 - With `prefixEnabled`, a dictation press whose transcript opens "Sotto, open Slack" becomes a command after speech-to-text (exact "scratch that" still wins first). Nothing is typed, and `CommandPhase.recognisedAsCommand` is emitted so the UI can flip.
-- `CommandPhase` events carry no transcript: `listening`, `working`, `acting`, `confirmPending`, `running`, `finished`, `failed`, `cancelled`, `recognisedAsCommand`. Only `CommandFailure.notFound` and `.ambiguous` name what was spoken. `SessionState` still carries recording, transcribing, errors ("Didn't catch that") and idle for both kinds of press.
+- `CommandPhase` events carry no transcript: `listening`, `working`, `acting`, `confirmPending(shortcut:)`, `running(shortcut:)`, `finished`, `failed`, `cancelled`, `recognisedAsCommand`. Only `CommandFailure.notFound` and `.ambiguous` name what was spoken. `SessionState` still carries recording, transcribing, errors ("Didn't catch that") and idle for both kinds of press.
 - A Shortcut with Ask first waits for a tap: a command-key key-down confirms (and starts no recording; its release is ignored), a dictation-key press cancels it and dictates, and it cancels itself after 8 s (10 s with `voiceOverRunning`). There is no Esc. Exactly one outcome is emitted. On the prefix path, `confirmKeyAvailable: false` fails with `CommandFailure.confirmKeyUnavailable` instead of waiting.
-- Every command outcome clears the "scratch that" target, so a spoken "scratch that" straight after a command is refused.
+- Every command outcome clears the "scratch that" target, at routing and again after the executor returns, so a spoken "scratch that" straight after a command is refused even if a dictation landed while a Shortcut ran.
+- `.open`, `.switchTo`, `.hide`, `.openFolder` and `.openLink` run with the injection lock held, so a queued dictation types only after `execute` returns. A Shortcut does not hold it, nor does the confirm wait.
+- The `commandCatalog` closure is called once per resolved command and must be fast: return a cached snapshot, no subprocess or file scans in it.
+- `commandPhaseUpdates()` and `stateUpdates()` are separate streams with no ordering guarantee between them. Take press mode (dictation or command) from your own key-down, not from whichever stream speaks first.
+- `SessionState` stays `.transcribing` through the confirm wait and the executor; `.idle` follows `CommandPhase.finished`.
+- A command press with no speech ends the phase stream at `working`; the outcome arrives as `SessionState.error`.
+- Versioning: the new `HotkeyEvent` cases break exhaustive `switch`es over it, so this ships as 0.4.0.
 - A command press during a dictation that is still being cleaned up does not cancel it: the dictation lands first, then the command runs.
 
 ## Copy-ahead decoding
