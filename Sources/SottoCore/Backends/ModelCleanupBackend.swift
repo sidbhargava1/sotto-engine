@@ -145,7 +145,7 @@ public actor ModelCleanupBackend: CleanupBackend {
             let head = try engine.tokenize(ChatML.prefix(system))
             let tail = try engine.tokenize(ChatML.tail(user))
             promptTokens = head.count + tail.count
-            guard promptTokens + maxTokens <= engine.contextSize else { throw CleanupError.contextOverflow }
+            guard promptTokens + maxTokens + engine.speculationHeadroom <= engine.contextSize else { throw CleanupError.contextOverflow }
             try engine.resetAndPrefill(head)
             try engine.replaceTail(tail, after: head.count)
             var stripper = ThinkStripper()
@@ -215,8 +215,8 @@ public actor ModelCleanupBackend: CleanupBackend {
             }
             let tail = try engine.tokenize(ChatML.tail(prompt.tail))
             let cap = 2 * tail.count + 64
-            if stagedCells > 0, prefixLength + stagedCells + tail.count + cap > engine.contextSize { cancelStaging() }
-            guard prefixLength + stagedCells + tail.count + cap <= engine.contextSize else { throw CleanupError.contextOverflow }
+            if stagedCells > 0, prefixLength + stagedCells + tail.count + cap + engine.speculationHeadroom > engine.contextSize { cancelStaging() }
+            guard prefixLength + stagedCells + tail.count + cap + engine.speculationHeadroom <= engine.contextSize else { throw CleanupError.contextOverflow }
             try engine.replaceTail(tail, after: prefixLength)
 
             var stripper = ThinkStripper()

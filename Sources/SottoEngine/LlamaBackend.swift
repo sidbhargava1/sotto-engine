@@ -12,10 +12,11 @@ private let nativeLog = Mutex(LogSubsystem.engine.logger("llm"))
 
 public enum LlamaBackend {
     /// n_ctx pinned (PLAN §3): the model's trained 256k would allocate gigabytes of KV cache.
-    public static func make(modelURL: URL, contextSize: Int = 3072, log: LogSubsystem) -> ModelCleanupBackend {
+    /// `speculation` is copy-ahead decoding (see CopyAhead); SOTTO_SPECULATION=0 in the environment turns it off too.
+    public static func make(modelURL: URL, contextSize: Int = 3072, speculation: Bool = true, log: LogSubsystem) -> ModelCleanupBackend {
         let llamaLog = log.logger("llm")
         nativeLog.withLock { $0 = llamaLog }
-        return ModelCleanupBackend(engine: LlamaEngine(modelURL: modelURL, contextSize: contextSize), queueLabel: "\(log.name).llm") { event in
+        return ModelCleanupBackend(engine: LlamaEngine(modelURL: modelURL, contextSize: contextSize, speculation: CopyAhead.Settings(enabled: speculation).merged(with: .fromEnvironment())), queueLabel: "\(log.name).llm") { event in
             Self.log(event, to: llamaLog)
         }
     }
@@ -46,13 +47,14 @@ public enum LlamaBackend {
 
 final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
     enum Failure: Error, CustomStringConvertible {
-        case loadModel(String), createContext, tokenize, decode(Int32)
+        case loadModel(String), createContext, tokenize, decode(Int32), kvRemove
         var description: String {
             switch self {
             case .loadModel(let path): "could not load \(path)"
             case .createContext: "could not create context"
             case .tokenize: "tokenize failed"
             case .decode(let code): "llama_decode returned \(code)"
+            case .kvRemove: "llama_memory_seq_rm refused a partial removal"
             }
         }
     }
@@ -72,6 +74,19 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
     private var stagedActive = false
     private(set) var swaps = 0  // committed staged prefixes (tests assert the staged path was taken)
     private var livePosition = 0  // next position on the live sequence
+    // Copy-ahead: tokens verified in one batch wait here and come out one per sampleNext call, so the
+    // backend's per-token cancellation, cap and stall checks are unchanged. `undecoded` is the last
+    // token of the burst. Counts only are logged.
+    var speculation: CopyAhead.Settings
+    private var source: [Int32] = []     // the request's tail tokens: what the draft copies from
+    private(set) var generated: [Int32] = []  // tokens returned so far this request
+    private var copyCursor = 0
+    private var queue: [llama_token] = []
+    private(set) var draftedTokens = 0, acceptedTokens = 0, speculativeSteps = 0
+    /// Tests force drafts to exercise rejection at chosen positions; nil in production.
+    var draftOverride: (([Int32]) -> [Int32])?
+    /// Tests stub the KV tail removal (from a position) to return false; nil in production.
+    var removeKV: ((Int32) -> Bool)?
 
     private static let backendInit: Void = {
         llama_log_set({ level, text, _ in
@@ -81,9 +96,24 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
         llama_backend_init()
     }()
 
-    init(modelURL: URL, contextSize: Int) {
+    init(modelURL: URL, contextSize: Int, speculation: CopyAhead.Settings = CopyAhead.Settings()) {
         self.modelURL = modelURL
         self.contextSize = contextSize
+        self.speculation = speculation
+    }
+
+    /// Recurrent and hybrid memories can't drop part of a sequence, so rejected draft cells could not be removed.
+    func applyMemoryKind(recurrent: Bool, hybrid: Bool) {
+        if recurrent || hybrid { speculation.enabled = false }
+    }
+
+    var speculationHeadroom: Int { speculation.headroom }
+    /// Cells the live sequence holds (tests compare it with the one-token-at-a-time path).
+    var kvLength: Int { Int(llama_memory_seq_pos_max(llama_get_memory(context), liveSeq)) + 1 }
+    /// Greedy verification is exact only because the sampler keeps no state between positions.
+    var samplerIsStatelessGreedy: Bool {
+        guard let sampler, llama_sampler_chain_n(sampler) == 1, let only = llama_sampler_chain_get(sampler, 0) else { return false }
+        return String(cString: llama_sampler_name(only)) == "greedy"
     }
 
     deinit { unload() }
@@ -114,6 +144,8 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
         let chain = llama_sampler_chain_init(llama_sampler_chain_default_params())
         llama_sampler_chain_add(chain, llama_sampler_init_greedy())  // temperature 0
         sampler = chain
+        if !samplerIsStatelessGreedy { speculation.enabled = false }
+        applyMemoryKind(recurrent: llama_model_is_recurrent(model), hybrid: llama_model_is_hybrid(model))
     }
 
     func tokenize(_ segments: [PromptSegment]) throws -> [Int32] {
@@ -136,6 +168,8 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
         llama_memory_clear(llama_get_memory(context), true)
         stagedActive = false
         livePosition = 0
+        queue = []
+        undecoded = nil
         try decode(tokens, seq: liveSeq, from: 0)
         livePosition = tokens.count
     }
@@ -145,6 +179,10 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
         llama_sampler_reset(sampler)
         pendingBytes = []
         undecoded = nil
+        queue = []
+        source = tokens
+        generated = []
+        copyCursor = 0
         try decode(tokens, seq: liveSeq, from: prefixLength)
         livePosition = prefixLength + tokens.count
     }
@@ -168,6 +206,7 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
         swaps += 1
         stagedActive = false
         undecoded = nil
+        queue = []
     }
 
     func discardStagedPrefix() {
@@ -177,22 +216,58 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
     }
 
     func sampleNext() throws -> String? {
-        if let previous = undecoded {
+        if !queue.isEmpty { return emit(queue.removeFirst(), tracksUndecoded: false) }
+        guard let previous = undecoded else {
+            return emit(llama_sampler_sample(sampler, context, -1))  // first token: the tail's last logits
+        }
+        var draft = speculation.enabled
+            ? CopyAhead.draft(source: source, generated: generated, settings: speculation, cursor: &copyCursor) : []
+        if let draftOverride { draft = draftOverride(generated) }
+        guard !draft.isEmpty else {
             try decode([previous], seq: liveSeq, from: livePosition)
             livePosition += 1
+            return emit(llama_sampler_sample(sampler, context, -1))
         }
-        let token = llama_sampler_sample(sampler, context, -1)
-        undecoded = nil
-        if llama_vocab_is_eog(vocab, token) { return nil }
-        undecoded = token
+        // One batch: the pending token plus the draft, logits at every position.
+        try decode([previous] + draft, seq: liveSeq, from: livePosition, allLogits: true)
+        let vocab = vocab, context = context, sampler = sampler
+        let r = CopyAhead.resolve(
+            draft: draft,
+            sample: { llama_sampler_sample(sampler, context, Int32($0)) },
+            isEnd: { llama_vocab_is_eog(vocab, $0) })
+        livePosition += 1 + r.accepted
+        if r.accepted < draft.count {
+            // Recurrent/hybrid memory refuses a partial removal; stale draft cells would silently skew the output.
+            let removed = removeKV?(Int32(livePosition)) ?? llama_memory_seq_rm(llama_get_memory(context), liveSeq, Int32(livePosition), -1)
+            guard removed else { speculation.enabled = false; throw Failure.kvRemove }
+        }
+        speculativeSteps += 1
+        draftedTokens += draft.count
+        acceptedTokens += r.accepted
+        queue = Array(r.emitted.dropFirst())
+        undecoded = r.ended ? nil : r.emitted.last
+        return emit(r.emitted[0], tracksUndecoded: false)
+    }
+
+    private func emit(_ token: llama_token, tracksUndecoded: Bool = true) -> String? {
+        if llama_vocab_is_eog(vocab, token) {
+            undecoded = nil
+            queue = []
+            if speculativeSteps > 0 {
+                nativeLog.withLock { $0 }.info("speculation: steps=\(self.speculativeSteps, privacy: .public) drafted=\(self.draftedTokens, privacy: .public) accepted=\(self.acceptedTokens, privacy: .public)")
+            }
+            return nil
+        }
+        if tracksUndecoded { undecoded = token }
+        generated.append(token)
         pendingBytes += piece(token)
         let valid = UTF8Prefix.completeLength(pendingBytes)
         defer { pendingBytes.removeFirst(valid) }
         return String(decoding: pendingBytes.prefix(valid), as: UTF8.self)
     }
 
-    /// Explicit positions and sequence id; only the last token asks for logits (none for staged prefill).
-    private func decode(_ tokens: [Int32], seq: llama_seq_id, from position: Int, logits: Bool = true) throws {
+    /// Explicit positions and sequence id; only the last token asks for logits (none for staged prefill, all for a verify batch).
+    private func decode(_ tokens: [Int32], seq: llama_seq_id, from position: Int, logits: Bool = true, allLogits: Bool = false) throws {
         guard !tokens.isEmpty else { return }
         var batch = llama_batch_init(Int32(tokens.count), 0, 1)
         defer { llama_batch_free(batch) }
@@ -202,7 +277,7 @@ final class LlamaEngine: LanguageModelEngine, @unchecked Sendable {
             batch.pos[i] = Int32(position + i)
             batch.n_seq_id[i] = 1
             batch.seq_id[i]![0] = seq
-            batch.logits[i] = logits && i == tokens.count - 1 ? 1 : 0
+            batch.logits[i] = allLogits || (logits && i == tokens.count - 1) ? 1 : 0
         }
         let code = llama_decode(context, batch)
         guard code == 0 else { throw Failure.decode(code) }
