@@ -24,7 +24,7 @@ final class CommandGrammarTests: XCTestCase {
     }
 
     enum Expect {
-        case app(CatalogApp, CommandAppState, CommandVerb)
+        case open(CatalogApp, CommandAppState), switchTo(CatalogApp, CommandAppState)
         case hide(CatalogApp)
         case folder, link, shortcut(askFirst: Bool)
         case failed(CommandFailure)
@@ -41,17 +41,17 @@ final class CommandGrammarTests: XCTestCase {
     }
 
     static let rows: [Row] = [
-        Row(n: 1, dictationKey: false, heard: "open Slack", expect: .app(slack, .running, .open)),
-        Row(n: 2, dictationKey: false, heard: "Sotto, open Slack", expect: .app(slack, .running, .open)),
-        Row(n: 3, dictationKey: false, heard: "can you open slack please", expect: .app(slack, .running, .open)),
-        Row(n: 4, dictationKey: false, heard: "launch x code", expect: .app(xcode, .running, .open)),
-        Row(n: 5, dictationKey: false, heard: "switch to Safari", expect: .app(safari, .running, .switchTo)),
-        Row(n: 6, dictationKey: false, heard: "go to Mail", expect: .app(mail, .notRunning, .switchTo)),
+        Row(n: 1, dictationKey: false, heard: "open Slack", expect: .open(slack, .running)),
+        Row(n: 2, dictationKey: false, heard: "Sotto, open Slack", expect: .open(slack, .running)),
+        Row(n: 3, dictationKey: false, heard: "can you open slack please", expect: .open(slack, .running)),
+        Row(n: 4, dictationKey: false, heard: "launch x code", expect: .open(xcode, .running)),
+        Row(n: 5, dictationKey: false, heard: "switch to Safari", expect: .switchTo(safari, .running)),
+        Row(n: 6, dictationKey: false, heard: "go to Mail", expect: .switchTo(mail, .notRunning)),
         Row(n: 7, dictationKey: false, heard: "hide Safari", expect: .hide(safari)),
         Row(n: 8, dictationKey: false, heard: "hide Mail", expect: .failed(.notRunning(mail))),
         Row(n: 9, dictationKey: false, heard: "hide", expect: .failed(.unrecognised)),
         Row(n: 10, dictationKey: false, heard: "open this app", expect: .failed(.unrecognised)),
-        Row(n: 11, dictationKey: false, heard: "open chrome", expect: .app(chrome, .running, .open)),
+        Row(n: 11, dictationKey: false, heard: "open chrome", expect: .open(chrome, .running)),
         Row(n: 12, dictationKey: false, heard: "open google",
             expect: .failed(.ambiguous(spoken: "google", candidates: ["Google Chrome", "Google Drive"]))),
         Row(n: 13, dictationKey: false, heard: "open invoices", expect: .folder),
@@ -71,8 +71,8 @@ final class CommandGrammarTests: XCTestCase {
         Row(n: 25, dictationKey: false, heard: "send the report to Maria", expect: .failed(.unrecognised)),
         Row(n: 26, dictationKey: false, heard: "scratch that", expect: .failed(.unrecognised)),
         // Row 27 is test_row27: it goes through DictionaryRewriter.
-        Row(n: 28, dictationKey: true, heard: "Sotto, open Slack", expect: .app(slack, .running, .open)),
-        Row(n: 29, dictationKey: true, heard: "soto open slack", expect: .app(slack, .running, .open)),
+        Row(n: 28, dictationKey: true, heard: "Sotto, open Slack", expect: .open(slack, .running)),
+        Row(n: 29, dictationKey: true, heard: "soto open slack", expect: .open(slack, .running)),
         Row(n: 30, dictationKey: true, heard: "Sotto open Slak", expect: .failed(.notFound(.app, spoken: "Slak"))),
         Row(n: 31, dictationKey: true, heard: "Sotto open source release notes are ready", expect: .dictation),
         Row(n: 32, dictationKey: true, heard: "Sotto", expect: .dictation),
@@ -97,7 +97,7 @@ final class CommandGrammarTests: XCTestCase {
         catalog.apps.append(fleet)
         let rewritten = DictionaryRewriter.rewrite("open fleet view", terms: [DictionaryTerm("FleetView (fleet view)")])
         XCTAssertEqual(rewritten, "open FleetView")
-        check(27, false, rewritten, .app(fleet, .notRunning, .open), catalog, prefixOn: true)
+        check(27, false, rewritten, .open(fleet, .notRunning), catalog, prefixOn: true)
     }
 
     private func check(_ n: Int, _ dictationKey: Bool, _ heard: String, _ expect: Expect,
@@ -120,13 +120,15 @@ final class CommandGrammarTests: XCTestCase {
             }
         }
         switch expect {
-        case .app(let app, let state, let verb):
-            XCTAssertEqual(resolved, .app(app, state: state, verb: verb), msg, file: file, line: line)
+        case .open(let app, let state):
+            XCTAssertEqual(resolved, .open(app, state: state), msg, file: file, line: line)
+        case .switchTo(let app, let state):
+            XCTAssertEqual(resolved, .switchTo(app, state: state), msg, file: file, line: line)
         case .hide(let app): XCTAssertEqual(resolved, .hide(app), msg, file: file, line: line)
         case .folder: XCTAssertEqual(resolved, .openFolder(Self.invoices), msg, file: file, line: line)
         case .link: XCTAssertEqual(resolved, .openLink(Self.standup), msg, file: file, line: line)
         case .shortcut(let ask):
-            XCTAssertEqual(resolved, .runShortcut(name: "Weekly update", askFirst: ask), msg, file: file, line: line)
+            XCTAssertEqual(resolved, .runShortcut(CatalogShortcut(name: "Weekly update", askFirst: ask)), msg, file: file, line: line)
         case .failed(let f): XCTAssertEqual(failure, f, msg, file: file, line: line)
         case .dictation: XCTAssertEqual(plain, .dictation, msg, file: file, line: line)
         case .scratchThat: XCTAssertEqual(plain, .scratchThat, msg, file: file, line: line)
@@ -194,14 +196,14 @@ final class CommandGrammarTests: XCTestCase {
         let c = Self.catalog()
         for wake in ["sotto", "Soto,", "so to", "So to,"] {
             XCTAssertEqual(CommandRouter.routeDictationKey("\(wake) open slack", catalog: c, prefixEnabled: true),
-                           .command(.app(Self.slack, state: .running, verb: .open)), wake)
+                           .command(.open(Self.slack, state: .running)), wake)
         }
         XCTAssertEqual(CommandRouter.routeDictationKey("otto open slack", catalog: c, prefixEnabled: true), .dictation)
     }
 
     func test_verbWithinThreeWordsOfWake() {
         let c = Self.catalog()
-        let slack = DictationKeyRouting.command(.app(Self.slack, state: .running, verb: .open))
+        let slack = DictationKeyRouting.command(.open(Self.slack, state: .running))
         XCTAssertEqual(CommandRouter.routeDictationKey("Sotto can you open slack", catalog: c, prefixEnabled: true), slack)
         XCTAssertEqual(CommandRouter.routeDictationKey("Sotto could you please open slack", catalog: c, prefixEnabled: true), .dictation)
         XCTAssertEqual(CommandRouter.routeDictationKey("Sotto just open slack", catalog: c, prefixEnabled: true), .dictation)
@@ -225,9 +227,9 @@ final class CommandGrammarTests: XCTestCase {
         var c = Self.catalog()
         c.apps.append(vsc)
         XCTAssertEqual(CommandRouter.routeCommandKey("open x code", catalog: c),
-                       .resolved(.app(Self.xcode, state: .running, verb: .open)))
+                       .resolved(.open(Self.xcode, state: .running)))
         XCTAssertEqual(CommandRouter.routeCommandKey("open visual studio", catalog: c),
-                       .resolved(.app(vsc, state: .notRunning, verb: .open)))
+                       .resolved(.open(vsc, state: .notRunning)))
     }
 
     func test_exactBeatsPartial() {
@@ -235,7 +237,7 @@ final class CommandGrammarTests: XCTestCase {
         var c = Self.catalog()
         c.apps.append(google)
         XCTAssertEqual(CommandRouter.routeCommandKey("open google", catalog: c),
-                       .resolved(.app(google, state: .notRunning, verb: .open)))
+                       .resolved(.open(google, state: .notRunning)))
     }
 
     func test_ambiguityNeverGuesses() {
@@ -254,7 +256,7 @@ final class CommandGrammarTests: XCTestCase {
         c.apps.append(app)
         XCTAssertEqual(CommandRouter.routeCommandKey("open invoices", catalog: c), .resolved(.openFolder(Self.invoices)))
         XCTAssertEqual(CommandRouter.routeCommandKey("switch to invoices", catalog: c),
-                       .resolved(.app(app, state: .notRunning, verb: .switchTo)))
+                       .resolved(.switchTo(app, state: .notRunning)))
     }
 
     func test_folderAndLinkSameNameIsAmbiguousUnlessForced() {
@@ -283,20 +285,20 @@ final class CommandGrammarTests: XCTestCase {
         var c = Self.catalog()
         c.shortcuts = [CatalogShortcut(name: "Weekly update", askFirst: false), CatalogShortcut(name: "Deploy")]
         XCTAssertEqual(CommandRouter.routeCommandKey("run weekly update", catalog: c),
-                       .resolved(.runShortcut(name: "Weekly update", askFirst: false)))
+                       .resolved(.runShortcut(CatalogShortcut(name: "Weekly update", askFirst: false))))
         XCTAssertEqual(CommandRouter.routeCommandKey("run deploy", catalog: c),
-                       .resolved(.runShortcut(name: "Deploy", askFirst: true)))
+                       .resolved(.runShortcut(CatalogShortcut(name: "Deploy", askFirst: true))))
     }
 
     func test_appStates() {
         var c = Self.catalog()
         c.frontmostAppID = Self.safari.id
         XCTAssertEqual(CommandRouter.routeCommandKey("open safari", catalog: c),
-                       .resolved(.app(Self.safari, state: .frontmost, verb: .open)))
+                       .resolved(.open(Self.safari, state: .frontmost)))
         XCTAssertEqual(CommandRouter.routeCommandKey("switch to slack", catalog: c),
-                       .resolved(.app(Self.slack, state: .running, verb: .switchTo)))
+                       .resolved(.switchTo(Self.slack, state: .running)))
         XCTAssertEqual(CommandRouter.routeCommandKey("open mail", catalog: c),
-                       .resolved(.app(Self.mail, state: .notRunning, verb: .open)))
+                       .resolved(.open(Self.mail, state: .notRunning)))
         XCTAssertEqual(CommandRouter.routeCommandKey("hide safari", catalog: c), .resolved(.hide(Self.safari)))
     }
 
@@ -304,6 +306,82 @@ final class CommandGrammarTests: XCTestCase {
         var c = Self.catalog()
         c.apps.append(Self.slack)
         XCTAssertEqual(CommandRouter.routeCommandKey("open slack", catalog: c),
-                       .resolved(.app(Self.slack, state: .running, verb: .open)))
+                       .resolved(.open(Self.slack, state: .running)))
+    }
+
+    // MARK: review follow-ups
+
+    func test_truncatedInputIsNeverScanned() {
+        let c = Self.catalog()
+        let padded = String(repeating: "please ", count: 30) + "open slack and tell everyone"
+        XCTAssertEqual(CommandRouter.routeCommandKey(padded, catalog: c), .failed(.unrecognised))
+        XCTAssertEqual(CommandRouter.routeDictationKey(padded, catalog: c, prefixEnabled: true), .dictation)
+        let sotto = "Sotto " + padded
+        XCTAssertEqual(CommandRouter.routeDictationKey(sotto, catalog: c, prefixEnabled: true), .dictation)
+        // 32 words is allowed, 33 is not.
+        let at32 = "open slack " + Array(repeating: "x", count: 30).joined(separator: " ")
+        XCTAssertNil(CommandGrammar.words(at32 + " x"))
+        XCTAssertEqual(CommandGrammar.words(at32)?.count, 32)
+        // Character cap.
+        let long = "open slack" + String(repeating: " ", count: 2_000)
+        XCTAssertEqual(CommandRouter.routeCommandKey(long, catalog: c), .failed(.unrecognised))
+        XCTAssertEqual(CommandRouter.routeDictationKey("Sotto " + long, catalog: c, prefixEnabled: true), .dictation)
+    }
+
+    func test_verbProperty() {
+        XCTAssertEqual(ResolvedCommand.open(Self.slack, state: .running).verb, .open)
+        XCTAssertEqual(ResolvedCommand.switchTo(Self.slack, state: .running).verb, .switchTo)
+        XCTAssertEqual(ResolvedCommand.hide(Self.slack).verb, .hide)
+        XCTAssertEqual(ResolvedCommand.openFolder(Self.invoices).verb, .open)
+        XCTAssertEqual(ResolvedCommand.openLink(Self.standup).verb, .open)
+        XCTAssertEqual(ResolvedCommand.runShortcut(CatalogShortcut(name: "x")).verb, .run)
+    }
+
+    func test_failureKindsArePayloadFree() {
+        let cases: [(CommandFailure, CommandFailure.Kind)] = [
+            (.unrecognised, .unrecognised), (.notFound(.app, spoken: "x"), .notFound),
+            (.ambiguous(spoken: "x", candidates: []), .ambiguous), (.notRunning(Self.mail), .notRunning),
+            (.shortcutsOff, .shortcutsOff),
+        ]
+        for (failure, kind) in cases { XCTAssertEqual(failure.kind, kind) }
+        XCTAssertEqual(Set(cases.map(\.1)), Set(CommandFailure.Kind.allCases))
+    }
+
+    func test_matchesAreDedupedByIDNotInputs() {
+        var c = Self.catalog()
+        let desktop = CatalogApp(name: "Slack Desktop", id: Self.slack.id)
+        c.apps.append(desktop)
+        // Second name for the same bundle ID still matches (and is the app returned)...
+        XCTAssertEqual(CommandRouter.routeCommandKey("open desktop", catalog: c),
+                       .resolved(.open(desktop, state: .running)))
+        // ...and two names matching one ID are not ambiguous.
+        let browser = CatalogApp(name: "Chrome Browser", id: Self.chrome.id)
+        c.apps.append(browser)
+        XCTAssertEqual(CommandRouter.routeCommandKey("open chrome", catalog: c),
+                       .resolved(.open(Self.chrome, state: .running)))
+        XCTAssertEqual(CommandRouter.routeCommandKey("switch to browser", catalog: c),
+                       .resolved(.switchTo(browser, state: .running)))
+    }
+
+    func test_hideFrontmostAppNotInRunningIDsCountsAsRunning() {
+        var c = Self.catalog()
+        c.runningAppIDs.remove(Self.safari.id)
+        c.frontmostAppID = Self.safari.id
+        XCTAssertEqual(CommandRouter.routeCommandKey("hide safari", catalog: c), .resolved(.hide(Self.safari)))
+    }
+
+    func test_prefixTwoWordRuleForShortcutsOffAndNotRunning() {
+        let off = Self.catalog(shortcuts: false)
+        XCTAssertEqual(CommandRouter.routeDictationKey("Sotto run backup", catalog: off, prefixEnabled: true),
+                       .commandError(.shortcutsOff))
+        XCTAssertEqual(CommandRouter.routeDictationKey("Sotto run backup now please", catalog: off, prefixEnabled: true),
+                       .commandError(.shortcutsOff))  // "please" is trailing filler: 2 target words
+        XCTAssertEqual(CommandRouter.routeDictationKey("Sotto run the weekly backup job", catalog: off, prefixEnabled: true),
+                       .dictation)
+        let c = Self.catalog()
+        XCTAssertEqual(CommandRouter.routeDictationKey("Sotto hide mail", catalog: c, prefixEnabled: true),
+                       .commandError(.notRunning(Self.mail)))
+        XCTAssertEqual(CommandRouter.routeDictationKey("Sotto hide the mail app", catalog: c, prefixEnabled: true),
+                       .dictation)
     }
 }

@@ -12,7 +12,7 @@ final class CommandGrammarQATests: XCTestCase {
     func d(_ s: String, _ c: CommandCatalog? = nil) -> DictationKeyRouting {
         CommandRouter.routeDictationKey(s, catalog: c ?? cat, prefixEnabled: true)
     }
-    func slackOpen() -> ResolvedCommand { .app(T.slack, state: .running, verb: .open) }
+    func slackOpen() -> ResolvedCommand { .open(T.slack, state: .running) }
     func noApp(_ s: String) -> CommandFailure { .notFound(.app, spoken: s) }
 
     func test_rows1to8_punctuationFillerWake() {
@@ -21,7 +21,7 @@ final class CommandGrammarQATests: XCTestCase {
             XCTAssertEqual(k(s), .resolved(slackOpen()), s)
         }
         for s in ["open x-code", "open X Code!"] {
-            XCTAssertEqual(k(s), .resolved(.app(T.xcode, state: .running, verb: .open)), s)
+            XCTAssertEqual(k(s), .resolved(.open(T.xcode, state: .running)), s)
         }
         for s in ["please", "can you", "Sotto"] { XCTAssertEqual(k(s), .failed(.unrecognised), s) }
     }
@@ -50,18 +50,18 @@ final class CommandGrammarQATests: XCTestCase {
     }
 
     func test_row19_exactBeatsPartMatch() {
-        XCTAssertEqual(k("open Google Chrome"), .resolved(.app(T.chrome, state: .running, verb: .open)))
+        XCTAssertEqual(k("open Google Chrome"), .resolved(.open(T.chrome, state: .running)))
         let google = CatalogApp(name: "Google", id: "id.google")
         var c = cat
         c.apps.append(google)
-        XCTAssertEqual(k("open google", c), .resolved(.app(google, state: .notRunning, verb: .open)))
+        XCTAssertEqual(k("open google", c), .resolved(.open(google, state: .notRunning)))
     }
 
     func test_row20_21_states() {
         var c = cat
         c.frontmostAppID = T.safari.id
-        XCTAssertEqual(k("switch to Safari", c), .resolved(.app(T.safari, state: .frontmost, verb: .switchTo)))
-        XCTAssertEqual(k("open Mail"), .resolved(.app(T.mail, state: .notRunning, verb: .open)))
+        XCTAssertEqual(k("switch to Safari", c), .resolved(.switchTo(T.safari, state: .frontmost)))
+        XCTAssertEqual(k("open Mail"), .resolved(.open(T.mail, state: .notRunning)))
         XCTAssertEqual(k("hide Mail"), .failed(.notRunning(T.mail)))
         XCTAssertEqual(k("hide Slak"), .failed(noApp("Slak")))
     }
@@ -71,8 +71,8 @@ final class CommandGrammarQATests: XCTestCase {
         let app = CatalogApp(name: "Standup", id: "id.standup")
         c.apps.append(app)
         XCTAssertEqual(k("open standup", c), .resolved(.openLink(T.standup)))
-        XCTAssertEqual(k("switch to standup", c), .resolved(.app(app, state: .notRunning, verb: .switchTo)))
-        XCTAssertEqual(k("go to standup", c), .resolved(.app(app, state: .notRunning, verb: .switchTo)))
+        XCTAssertEqual(k("switch to standup", c), .resolved(.switchTo(app, state: .notRunning)))
+        XCTAssertEqual(k("go to standup", c), .resolved(.switchTo(app, state: .notRunning)))
         XCTAssertEqual(k("open folder standup", c), .failed(.notFound(.folder, spoken: "standup")))
         XCTAssertEqual(k("hide invoices"), .failed(noApp("invoices")))
         XCTAssertEqual(k("switch to invoices"), .failed(noApp("invoices")))
@@ -94,7 +94,7 @@ final class CommandGrammarQATests: XCTestCase {
         var c = cat
         c.apps += [cafe, resume, nfd, emoji, cjk]
         func opens(_ s: String, _ a: CatalogApp) {
-            XCTAssertEqual(k(s, c), .resolved(.app(a, state: .notRunning, verb: .open)), s)
+            XCTAssertEqual(k(s, c), .resolved(.open(a, state: .notRunning)), s)
         }
         opens("open cafe notes", cafe)
         opens("open CAFÉ NOTES", cafe)
@@ -127,7 +127,7 @@ final class CommandGrammarQATests: XCTestCase {
         XCTAssertEqual(k(String(repeating: "please ", count: 5_000) + "open slack"), .failed(.unrecognised))
         XCTAssertEqual(d("Sotto " + words), .dictation)
         XCTAssertEqual(d("Sotto open " + words), .dictation)
-        _ = k(spaced)
+        XCTAssertEqual(k(spaced), .failed(.unrecognised))
         XCTAssertLessThan(Date().timeIntervalSince(start), 2)
         for s in ["open", "open ...", "open !?, -", "Sotto open ."] { XCTAssertEqual(k(s), .failed(.unrecognised), s) }
     }

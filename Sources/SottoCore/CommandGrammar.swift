@@ -49,17 +49,21 @@ public enum CommandGrammar {
     /// A "word" longer than this is not a name anyone spoke; never echoed back in a message.
     static let maxWordLength = 64
 
-    static func words(_ raw: String) -> [Word] {
-        raw.prefix(maxScannedCharacters).split(whereSeparator: \.isWhitespace).prefix(maxScannedWords).compactMap { token in
+    /// nil when the input exceeds either cap: a truncated prefix must never be scanned, because a
+    /// command can look complete in the first 32 words of a longer utterance.
+    static func words(_ raw: String) -> [Word]? {
+        guard raw.prefix(maxScannedCharacters + 1).count <= maxScannedCharacters else { return nil }
+        let all: [Word] = raw.split(whereSeparator: \.isWhitespace).compactMap { token in
             let text = String(String.UnicodeScalarView(
                 token.unicodeScalars.filter { !CharacterSet.punctuationCharacters.contains($0) }))
             return text.isEmpty ? nil : Word(text: text, key: text.lowercased())
         }
+        return all.count <= maxScannedWords ? all : nil
     }
 
     /// Command-key entry: a leading "Sotto," is accepted and ignored.
     public static func parseCommandKey(_ transcript: String) -> ParsedCommand? {
-        let w = words(transcript)
+        guard let w = words(transcript) else { return nil }
         var i = 0
         while true {
             if let n = matchLeading(w, at: i, wake: true) { i += n } else { break }
@@ -71,7 +75,7 @@ public enum CommandGrammar {
     /// Dictation-key prefix entry: the wake word must be the first word, then only filler (at most
     /// two words, so the verb is within 3 words of the wake word), then a verb.
     static func scanPrefix(_ transcript: String) -> Scan {
-        let w = words(transcript)
+        guard let w = words(transcript) else { return .notACommand }
         guard let wake = wakeVariants.first(where: { matches(w, at: 0, $0) }) else { return .notACommand }
         var i = wake.count
         while let n = matchLeading(w, at: i, wake: false) { i += n }

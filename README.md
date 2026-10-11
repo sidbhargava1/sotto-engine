@@ -151,7 +151,9 @@ case .scratchThat, .dictation, .command, .commandError: break
 
 - Verbs: open/launch, switch to/go to, hide, run/run shortcut; "open folder X" and "open link X" force the kind. Filler ("can you", "please", "for me") and a leading "Sotto," on the command key are ignored. Deictic targets ("this app", "it"), a missing object and targets over four words are `.unrecognised`, never named.
 - Names compare with spaces, hyphens and punctuation removed. An exact name wins, otherwise a whole-word part of exactly one app name ("chrome" is Google Chrome); two or more is `.ambiguous`. A named folder or link beats a same-named app for "open". Kinds never cross.
-- `ResolvedCommand.app` carries a `CommandAppState` (`notRunning`, `running`, `frontmost`) so a UI can say "Opening", "Switching to" or "Already in". `.runShortcut` carries `askFirst`.
+- `ResolvedCommand` has `.open(app, state:)` ("open", "launch"), `.switchTo(app, state:)` ("switch to", "go to"), `.hide`, `.openFolder`, `.openLink` and `.runShortcut(CatalogShortcut)` (which carries `askFirst`). Copy is driven by `CommandAppState`, not the case: `notRunning` is "Opening", `running` is "Switching to", `frontmost` is "Already in". The case is kept for per-verb counters, and `ResolvedCommand.verb` gives the `CommandVerb`.
+- Input past 2,000 characters or 32 words is never scanned: it is `.unrecognised` on the command key and `.dictation` on the dictation key.
+- `CommandFailure` and `ParsedCommand` carry heard text; never interpolate them into logs. Log or count `CommandFailure.kind` (`CommandFailure.Kind`, a closed payload-free enum).
 - On the dictation key the order is exact "scratch that" (`CommandParser`), then the command grammar, then dictation. The wake word (sotto, soto, so to) must be the first word and only filler may sit between it and the verb. An unresolved target of two words or fewer is `.commandError`; anything longer, or no prefix, is `.dictation` with the text unchanged.
 
 ## Copy-ahead decoding

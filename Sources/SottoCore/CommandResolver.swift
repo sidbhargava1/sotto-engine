@@ -8,16 +8,32 @@ public enum CommandAppState: Sendable, Equatable {
     case frontmost   // "Already in X"
 }
 
+/// What the host should do. For app commands the capsule copy is driven by `state`, not the case:
+/// `.notRunning` is "Opening", `.running` is "Switching to", `.frontmost` is "Already in". The
+/// case (`.open` vs `.switchTo`) records which verb was spoken, for per-verb counters. Both launch
+/// a closed app and bring a running one forward.
 public enum ResolvedCommand: Sendable, Equatable {
-    /// `verb` is `.open` or `.switchTo`; both launch a closed app and bring a running one forward.
-    case app(CatalogApp, state: CommandAppState, verb: CommandVerb)
-    /// Only produced for a running app.
+    case open(CatalogApp, state: CommandAppState)
+    case switchTo(CatalogApp, state: CommandAppState)
+    /// Only produced for a running app (frontmost counts as running).
     case hide(CatalogApp)
     case openFolder(CatalogItem)
     case openLink(CatalogItem)
-    case runShortcut(name: String, askFirst: Bool)
+    case runShortcut(CatalogShortcut)
+
+    /// The spoken verb. Folders and links are "open"; shortcuts are "run".
+    public var verb: CommandVerb {
+        switch self {
+        case .open, .openFolder, .openLink: return .open
+        case .switchTo: return .switchTo
+        case .hide: return .hide
+        case .runShortcut: return .run
+        }
+    }
 }
 
+/// Carries heard text (`notFound`/`ambiguous`), as does `ParsedCommand`: never interpolate either
+/// into a log. Log or count `kind`, which has no payload.
 public enum CommandFailure: Error, Sendable, Equatable {
     /// Not a command, a deictic or over-long target, or no object. The host shows what was heard.
     case unrecognised
@@ -26,6 +42,21 @@ public enum CommandFailure: Error, Sendable, Equatable {
     case ambiguous(spoken: String, candidates: [String])
     case notRunning(CatalogApp)
     case shortcutsOff
+
+    /// Payload-free and closed: safe for logs and counters.
+    public enum Kind: String, Sendable, Equatable, CaseIterable {
+        case unrecognised, notFound, ambiguous, notRunning, shortcutsOff
+    }
+
+    public var kind: Kind {
+        switch self {
+        case .unrecognised: return .unrecognised
+        case .notFound: return .notFound
+        case .ambiguous: return .ambiguous
+        case .notRunning: return .notRunning
+        case .shortcutsOff: return .shortcutsOff
+        }
+    }
 }
 
 public enum CommandResolver {
@@ -53,7 +84,7 @@ public enum CommandResolver {
         case .run:
             guard catalog.shortcutsEnabled else { return .failure(.shortcutsOff) }
             switch find(spoken, in: catalog.shortcuts.map { ($0.name, $0) }) {
-            case .one(let s): return .success(.runShortcut(name: s.name, askFirst: s.askFirst))
+            case .one(let s): return .success(.runShortcut(s))
             case .many(let all): return .failure(.ambiguous(spoken: spoken, candidates: all.map(\.name)))
             case .none: return .failure(.notFound(.shortcut, spoken: spoken))
             }
@@ -72,9 +103,14 @@ public enum CommandResolver {
 
     private static func app(_ command: ParsedCommand, _ spoken: String, _ catalog: CommandCatalog)
         -> Result<ResolvedCommand, CommandFailure> {
-        var seen = Set<String>()
-        let apps = catalog.apps.filter { seen.insert($0.id).inserted }
-        switch find(spoken, in: apps.map { ($0.name, $0) }) {
+        // Dedupe the matches by id, not the inputs: a second name for the same bundle ID can still match.
+        var found = find(spoken, in: catalog.apps.map { ($0.name, $0) })
+        if case .many(let all) = found {
+            var seen = Set<String>()
+            let unique = all.filter { seen.insert($0.id).inserted }
+            found = unique.count == 1 ? .one(unique[0]) : .many(unique)
+        }
+        switch found {
         case .none: return .failure(.notFound(.app, spoken: spoken))
         case .many(let all): return .failure(.ambiguous(spoken: spoken, candidates: all.map(\.name)))
         case .one(let app):
@@ -84,7 +120,7 @@ public enum CommandResolver {
             }
             let state: CommandAppState = catalog.frontmostAppID == app.id ? .frontmost
                 : running ? .running : .notRunning
-            return .success(.app(app, state: state, verb: command.verb))
+            return .success(command.verb == .switchTo ? .switchTo(app, state: state) : .open(app, state: state))
         }
     }
 
