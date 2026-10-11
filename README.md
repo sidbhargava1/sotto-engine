@@ -156,6 +156,26 @@ case .scratchThat, .dictation, .command, .commandError: break
 - `CommandFailure` and `ParsedCommand` carry heard text; never interpolate them into logs. Log or count `CommandFailure.kind` (`CommandFailure.Kind`, a closed payload-free enum).
 - On the dictation key the order is exact "scratch that" (`CommandParser`), then the command grammar, then dictation. The wake word (sotto, soto, so to) must be the first word and only filler may sit between it and the verb. An unresolved target of two words or fewer is `.commandError`; anything longer, or no prefix, is `.dictation` with the text unchanged.
 
+### Running commands in a session
+
+`DictationSession` runs the grammar for you. The host adds a second hotkey that yields `HotkeyEvent.commandPressed` and `.commandReleased` (the dictation key keeps `.pressed` and `.released` and always dictates), and passes four things to the session:
+
+```swift
+DictationSession(
+    ...,
+    commandInputs: { CommandInputs(commandsEnabled: true, prefixEnabled: true) },  // read at each press
+    commandCatalog: { await myCatalog() },                                          // read when a command resolves
+    commandExecutor: myExecutor)                                                    // your CommandExecuting
+for await phase in await session.commandPhaseUpdates() { ... }                     // drives the indicator
+```
+
+- A command press never asks the display gate, never computes partials, stops at 15 s (`maxCommandRecordingDuration`, dictation stays at 60 s) and continues like a release. After speech-to-text the transcript goes through your dictionary's heard-as rewrite (or `commandRewrite:`), then the router, then your executor. It never calls cleanup, injects, sends a key, touches the pasteboard or writes History, so it works with cleanup missing or failed.
+- With `prefixEnabled`, a dictation press whose transcript opens "Sotto, open Slack" becomes a command after speech-to-text (exact "scratch that" still wins first). Nothing is typed, and `CommandPhase.recognisedAsCommand` is emitted so the UI can flip.
+- `CommandPhase` events carry no transcript: `listening`, `working`, `acting`, `confirmPending`, `running`, `finished`, `failed`, `cancelled`, `recognisedAsCommand`. Only `CommandFailure.notFound` and `.ambiguous` name what was spoken. `SessionState` still carries recording, transcribing, errors ("Didn't catch that") and idle for both kinds of press.
+- A Shortcut with Ask first waits for a tap: a command-key key-down confirms (and starts no recording; its release is ignored), a dictation-key press cancels it and dictates, and it cancels itself after 8 s (10 s with `voiceOverRunning`). There is no Esc. Exactly one outcome is emitted. On the prefix path, `confirmKeyAvailable: false` fails with `CommandFailure.confirmKeyUnavailable` instead of waiting.
+- Every command outcome clears the "scratch that" target, so a spoken "scratch that" straight after a command is refused.
+- A command press during a dictation that is still being cleaned up does not cancel it: the dictation lands first, then the command runs.
+
 ## Copy-ahead decoding
 
 Cleanup output is nearly a copy of the transcript, so `LlamaEngine` guesses the next few tokens by copying from the prompt and has the model verify them in one batch with greedy sampling. The text is the same as one-token-at-a-time decoding; verified byte-identical on 103 transcripts on Apple silicon (M-series), though batched verification can differ in the last float bits on other GPUs. It needs llama.cpp b11404 or later (the engine's pinned b11514 qualifies) and a model whose memory can drop part of a sequence: recurrent and hybrid models run without it. Hosts decide with `LlamaBackend.make(..., speculation:)` (default on); `SOTTO_SPECULATION=0` in the environment is a debug override that turns it off.

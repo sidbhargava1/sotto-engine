@@ -42,10 +42,13 @@ public enum CommandFailure: Error, Sendable, Equatable {
     case ambiguous(spoken: String, candidates: [String])
     case notRunning(CatalogApp)
     case shortcutsOff
+    /// Prefix path only: the Shortcut needs a confirm tap, but no command key is bound. The host
+    /// shows "Set a command shortcut to confirm".
+    case confirmKeyUnavailable
 
     /// Payload-free and closed: safe for logs and counters.
     public enum Kind: String, Sendable, Equatable, CaseIterable {
-        case unrecognised, notFound, ambiguous, notRunning, shortcutsOff
+        case unrecognised, notFound, ambiguous, notRunning, shortcutsOff, confirmKeyUnavailable
     }
 
     public var kind: Kind {
@@ -55,6 +58,7 @@ public enum CommandFailure: Error, Sendable, Equatable {
         case .ambiguous: return .ambiguous
         case .notRunning: return .notRunning
         case .shortcutsOff: return .shortcutsOff
+        case .confirmKeyUnavailable: return .confirmKeyUnavailable
         }
     }
 }
