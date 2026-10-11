@@ -341,7 +341,7 @@ final class CommandGrammarTests: XCTestCase {
         let cases: [(CommandFailure, CommandFailure.Kind)] = [
             (.unrecognised, .unrecognised), (.notFound(.app, spoken: "x"), .notFound),
             (.ambiguous(spoken: "x", candidates: []), .ambiguous), (.notRunning(Self.mail), .notRunning),
-            (.shortcutsOff, .shortcutsOff),
+            (.shortcutsOff, .shortcutsOff), (.confirmKeyUnavailable, .confirmKeyUnavailable),
         ]
         for (failure, kind) in cases { XCTAssertEqual(failure.kind, kind) }
         XCTAssertEqual(Set(cases.map(\.1)), Set(CommandFailure.Kind.allCases))

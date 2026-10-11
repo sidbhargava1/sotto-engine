@@ -28,6 +28,13 @@ public enum CommandRouter {
         }
     }
 
+    /// A cheap pre-check so a dictation never pays for a catalogue read: true if the transcript opens
+    /// with the wake word and a verb that parses. Says nothing about whether the target resolves.
+    static func hasCommandPrefix(_ transcript: String) -> Bool {
+        if case .command = CommandGrammar.scanPrefix(transcript) { return true }
+        return false
+    }
+
     /// Order: exact "scratch that", then the command grammar, then dictation.
     public static func routeDictationKey(
         _ transcript: String, catalog: CommandCatalog, prefixEnabled: Bool

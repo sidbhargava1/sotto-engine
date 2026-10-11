@@ -17,5 +17,9 @@ public enum CommandOutcome: Sendable, Equatable {
 }
 
 public protocol CommandExecuting: Sendable {
+    /// A non-Shortcut `execute` holds the session's injection lock. Return as soon as the launch,
+    /// activate, hide or open request has been made; do not wait for a cold-start app to finish
+    /// launching or become frontmost. Never block indefinitely: a hung executor blocks dictation.
+    /// Observe "app is now frontmost" outside `execute`.
     func execute(_ command: ResolvedCommand) async -> CommandOutcome
 }
