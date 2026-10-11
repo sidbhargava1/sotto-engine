@@ -4,7 +4,7 @@
 import Foundation
 
 /// Which key started a press. The dictation key always dictates; only the command key is command mode.
-public enum TriggerKind: Sendable, Equatable {
+enum TriggerKind: Sendable, Equatable {
     case dictation
     case command
 }
@@ -15,19 +15,20 @@ public enum TriggerKind: Sendable, Equatable {
 /// A command run emits, in order: `listening` (command key only), `working` (command key only),
 /// `recognisedAsCommand` (prefix path only), then exactly one of
 /// - `acting(_)` then `finished(_)` for app, folder, link and hide commands;
-/// - `running` then `finished(_)` for a Shortcut (preceded by `confirmPending` when Ask first is on);
+/// - `running(shortcut:)` then `finished(_)` for a Shortcut (preceded by `confirmPending` when Ask first is on);
 /// - `failed(_)`, `cancelled`.
 public enum CommandPhase: Sendable, Equatable {
     /// The command key went down and capture started (never for a dictation press).
-    case listening(TriggerKind)
+    case listening
     /// The command key was released (or the 15 s cap fired); speech-to-text and routing follow.
     case working
     /// The transcript resolved. Carries the action, never the transcript. Not sent for Shortcuts.
     case acting(ResolvedCommand)
     /// A Shortcut with Ask first is waiting for a tap on the command key. Carries its name.
     case confirmPending(shortcut: String)
-    /// A Shortcut was confirmed (or needs no confirm) and is being started.
-    case running
+    /// A Shortcut was confirmed (or needs no confirm) and is being started. Carries its name, since
+    /// with Ask first off there was no `confirmPending` to learn it from.
+    case running(shortcut: String)
     case finished(CommandOutcome)
     case failed(CommandFailure)
     /// A pending confirm timed out, was answered by a dictation-key press, or the session stopped.

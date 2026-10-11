@@ -277,6 +277,7 @@ public actor DictationSession {
     }
 
     private func handlePressed(_ settings: Settings, kind: TriggerKind, inputs: CommandInputs) async {
+        if kind == .command { ignoreCommandRelease = false } // a confirm tap whose key-up was lost must not eat this press's release
         guard !isRecording else { return } // DS-09: never double-start the one warm engine
         isRecording = true
         recordingKind = kind
@@ -301,7 +302,7 @@ public actor DictationSession {
             try await audio.start()
             // A command press shows nothing live: no gate, no partials, no raw snapshot.
             recordingDisplays = kind == .command ? false : await displayGate() // before .recording, which the UI lays out by
-            if kind == .command { emitCommand(.listening(.command)) }
+            if kind == .command { emitCommand(.listening) }
             emit(.recording)
             if livePartials, recordingDisplays { startPartials(engine, generation: recordingGeneration) }
             if kind == .command { scheduleCommandCap(generation: recordingGeneration) } else { scheduleMaxDurationCap(generation: recordingGeneration) }

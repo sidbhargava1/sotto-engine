@@ -60,9 +60,10 @@ extension DictationSession {
     /// Command key: STT is done. Waits behind any dictation still landing (it lands first), then
     /// rewrites heard-as variants, routes and clears the scratch-that guard, all under the lock.
     func runCommandKeyUtterance(_ transcript: String, inputs: CommandInputs) async {
+        // The host's closure runs before the lock, so a slow one never stalls a queued dictation.
+        let catalog = await commandCatalogProvider()
         let route = await injectionLock.runExclusive {
             let rewritten = await self.commandRewrite(transcript)
-            let catalog = await self.commandCatalogProvider()
             let route: CommandRoute
             switch CommandRouter.routeCommandKey(rewritten, catalog: catalog) {
             case .resolved(let command): route = .resolved(command)
@@ -110,7 +111,9 @@ extension DictationSession {
             emitCommand(.failed(failure))
         case .resolved(let command):
             guard let executor = commandExecutor else { return }
+            var isShortcut = false
             if case .runShortcut(let shortcut) = command {
+                isShortcut = true
                 if shortcut.askFirst {
                     // The prefix path has no key press of its own, so it needs a bound command key.
                     if source == .prefix, !inputs.confirmKeyAvailable {
@@ -119,11 +122,24 @@ extension DictationSession {
                     }
                     guard await awaitConfirm(shortcut: shortcut.name, timeout: inputs.confirmTimeout) == .confirmed else { return }
                 }
-                emitCommand(.running)
+                emitCommand(.running(shortcut: shortcut.name))
             } else {
                 emitCommand(.acting(command))
             }
-            let outcome = await executor.execute(command)
+            // Bringing an app forward holds the lock so a queued dictation can't type into the wrong
+            // app meanwhile. A Shortcut can run for minutes and doesn't move focus, so it doesn't.
+            // Either way the guard is cleared after the command (spec: "after any command").
+            let outcome: CommandOutcome
+            if isShortcut {
+                outcome = await executor.execute(command)
+                await injectionLock.runExclusive { await self.clearScratchGuard() }
+            } else {
+                outcome = await injectionLock.runExclusive {
+                    let outcome = await executor.execute(command)
+                    await self.clearScratchGuard()
+                    return outcome
+                }
+            }
             log.info("command: finished (\(String(describing: outcome), privacy: .public))")
             emitCommand(.finished(outcome))
         }

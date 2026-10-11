@@ -41,13 +41,14 @@ class CommandTestCase: SessionTestCase {
         catalog: CommandCatalog = T.catalog(), dictionary: [DictionaryTerm] = [],
         audio: FixtureAudioCapture = FixtureAudioCapture(), settings: Settings = Settings(),
         transcriber: FixtureTranscriber? = nil, executor: FakeCommandExecutor = FakeCommandExecutor(),
-        idleSleepGrace: Duration = AudioIdleSleep.grace, sleeper: ManualSleeper? = nil
+        idleSleepGrace: Duration = AudioIdleSleep.grace, sleeper: ManualSleeper? = nil,
+        backend: (any CleanupBackend)? = nil
     ) async -> Rig {
         let history = RecordingHistory()
         let gate = Counter(), cleanup = Counter()
         let sleepFn: Deadline.Sleeper? = sleeper.map { s in { @Sendable d in await s.sleep(d) } }
         let h = makeHarness(
-            transcriber: transcriber ?? FixtureTranscriber(texts), backend: CountingFailingBackend(counter: cleanup),
+            transcriber: transcriber ?? FixtureTranscriber(texts), backend: backend ?? CountingFailingBackend(counter: cleanup),
             audio: audio, idleSleepGrace: idleSleepGrace,
             displayGate: { gate.bump(); return true }, dictionary: dictionary, settings: settings, history: history,
             commandInputs: inputs, commandCatalog: catalog, executor: executor,
@@ -101,12 +102,12 @@ class CommandTestCase: SessionTestCase {
 
     /// What a transcript should produce, derived from the router on the same catalogue.
     func expectedPhases(_ route: CommandRoute, prefix: Bool, tap: Bool) -> [CommandPhase] {
-        var out: [CommandPhase] = prefix ? [.recognisedAsCommand] : [.listening(.command), .working]
+        var out: [CommandPhase] = prefix ? [.recognisedAsCommand] : [.listening, .working]
         switch route {
         case .failed(let f): out.append(.failed(f))
         case .resolved(.runShortcut(let shortcut)):
             if shortcut.askFirst { out.append(.confirmPending(shortcut: shortcut.name)) }
-            out += [.running, .finished(.done)]
+            out += [.running(shortcut: shortcut.name), .finished(.done)]
         case .resolved(let c): out += [.acting(c), .finished(.done)]
         }
         return out
@@ -173,11 +174,8 @@ final class CommandSessionTests: CommandTestCase {
 
     func test_allTableRowsThroughASession() async {
         for row in T.rows {
-            var inputs = Self.allOn
-            inputs.prefixEnabled = row.prefixOn
             await runRow(row.heard, dictationKey: row.dictationKey, catalog: T.catalog(shortcuts: row.shortcutsOn),
                          prefixOn: row.prefixOn, label: "row \(row.n): \(row.heard)")
-            _ = inputs
         }
     }
 
@@ -254,7 +252,7 @@ final class CommandSessionTests: CommandTestCase {
         let heard = "send the report to Maria"
         let r = await rig([.text(heard)])
         await speakCommand(r)
-        await expectPhases(r, [.listening(.command), .working, .failed(.unrecognised)])
+        await expectPhases(r, [.listening, .working, .failed(.unrecognised)])
         let states = await r.states.settled()
         XCTAssertEqual(states, [.recording, .transcribing, .idle])
         for event in r.phases.snapshot().map({ "\($0)" }) + states.map({ "\($0)" }) {
@@ -273,14 +271,58 @@ final class CommandSessionTests: CommandTestCase {
     func test_commandPressWorksWithCleanupFailingAndTouchesNothing() async {
         let r = await rig([.text("open Slack")]) // every cleanup request would throw
         await speakCommand(r)
-        await expectPhases(r, [.listening(.command), .working, .acting(.open(T.slack, state: .running)), .finished(.done)])
+        await expectPhases(r, [.listening, .working, .acting(.open(T.slack, state: .running)), .finished(.done)])
         await assertNoSideEffects(r) // includes "cleanup was never asked"
+    }
+
+    /// The host has no cleanup model (RawBackend, what the app passes when none is installed).
+    func test_commandPressWorksWithNoCleanupModel() async {
+        let r = await rig([.text("open Slack")], backend: RawBackend())
+        await speakCommand(r)
+        await expectPhases(r, [.listening, .working, .acting(.open(T.slack, state: .running)), .finished(.done)])
+        await assertNoSideEffects(r)
+    }
+
+    func test_strayReleasesAreIgnored() async {
+        let r = await rig([.text("hello world")])
+        await r.h.hotkey.release()
+        await r.h.hotkey.releaseCommand()
+        await settle(r.h)
+        var calls = await r.h.audio.calls
+        XCTAssertEqual(calls, [], "a release with no press starts and stops nothing")
+        XCTAssertEqual(r.states.snapshot(), [])
+        XCTAssertEqual(r.phases.snapshot(), [])
+        // A release of the other key must not end a recording.
+        await r.h.hotkey.press()
+        await waitUntil("recording") { await r.h.audio.calls.contains("start") }
+        await r.h.hotkey.releaseCommand()
+        await settle(r.h)
+        calls = await r.h.audio.calls
+        XCTAssertEqual(calls, ["start"], "a command release does not stop a dictation")
+        await r.h.hotkey.release()
+        await settle(r.h)
+        let typed = await r.h.ax.injectedText()
+        XCTAssertEqual(typed, "hello world")
+    }
+
+    func test_dictationReleaseDoesNotEndACommandRecording() async {
+        let r = await rig([.text("open Slack")])
+        await r.h.hotkey.pressCommand()
+        await waitUntil("recording") { await r.h.audio.calls.contains("start") }
+        await r.h.hotkey.release()
+        await settle(r.h)
+        let calls = await r.h.audio.calls
+        XCTAssertEqual(calls, ["start"])
+        await r.h.hotkey.releaseCommand()
+        await settle(r.h)
+        let ran = await r.h.executor.callCount()
+        XCTAssertEqual(ran, 1)
     }
 
     func test_executorFailureOutcomeIsReportedOnce() async {
         let r = await rig([.text("open Mail")], executor: FakeCommandExecutor(outcome: .launchFailed))
         await speakCommand(r)
-        await expectPhases(r, [.listening(.command), .working,
+        await expectPhases(r, [.listening, .working,
                                .acting(.open(T.mail, state: .notRunning)), .finished(.launchFailed)])
     }
 
@@ -329,7 +371,7 @@ final class CommandSessionTests: CommandTestCase {
         await speakCommand(r)
         let states = await r.states.settled()
         XCTAssertEqual(states, [.recording, .transcribing, .error(.sttFailed), .idle])
-        XCTAssertEqual(r.phases.snapshot(), [.listening(.command), .working], "no outcome event: the error state speaks")
+        XCTAssertEqual(r.phases.snapshot(), [.listening, .working], "no outcome event: the error state speaks")
         await assertNoSideEffects(r)
     }
 

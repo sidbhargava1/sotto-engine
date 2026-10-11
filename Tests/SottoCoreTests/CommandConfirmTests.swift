@@ -9,7 +9,7 @@ final class CommandConfirmTests: CommandTestCase {
 
     func count(_ r: Rig, _ match: (CommandPhase) -> Bool) -> Int { r.phases.snapshot().filter(match).count }
     func isCancelled(_ p: CommandPhase) -> Bool { p == .cancelled }
-    func isRunning(_ p: CommandPhase) -> Bool { p == .running }
+    func isRunning(_ p: CommandPhase) -> Bool { if case .running = p { true } else { false } }
 
     /// A command-key shortcut waiting for its tap.
     func pendingRig(inputs: CommandInputs = CommandSessionTests.allOn, texts: [FixtureTranscriber.Behavior] = [.text("run weekly update")]) async -> Rig {
@@ -30,7 +30,7 @@ final class CommandConfirmTests: CommandTestCase {
         await r.h.hotkey.releaseCommand() // its release
         await settle(r.h)
         XCTAssertEqual(r.phases.snapshot(), phasesAtTap, "the matching release emits nothing")
-        XCTAssertEqual(phasesAtTap, [.listening(.command), .working, .confirmPending(shortcut: "Weekly update"), .running, .finished(.done)])
+        XCTAssertEqual(phasesAtTap, [.listening, .working, .confirmPending(shortcut: "Weekly update"), .running(shortcut: "Weekly update"), .finished(.done)])
         let calls = await r.h.audio.calls
         XCTAssertEqual(calls, ["start", "stop"], "the tap starts no recording")
         let ran = await r.h.executor.calls
@@ -66,7 +66,7 @@ final class CommandConfirmTests: CommandTestCase {
         XCTAssertEqual(count(r, isCancelled), 0, "nothing at 7.99 s")
         r.h.clock.advance(.milliseconds(10))
         await settle(r.h)
-        await expectPhases(r, [.listening(.command), .working, .confirmPending(shortcut: "Weekly update"), .cancelled])
+        await expectPhases(r, [.listening, .working, .confirmPending(shortcut: "Weekly update"), .cancelled])
         let ran = await r.h.executor.callCount()
         XCTAssertEqual(ran, 0)
         await assertNoSideEffects(r)
@@ -186,7 +186,7 @@ final class CommandConfirmTests: CommandTestCase {
         await waitUntil("confirm pending") { r.phases.snapshot().contains(where: self.isConfirmPending) }
         await holdCommandKey(r)
         await settle(r.h)
-        await expectPhases(r, [.recognisedAsCommand, .confirmPending(shortcut: "Weekly update"), .running, .finished(.done)])
+        await expectPhases(r, [.recognisedAsCommand, .confirmPending(shortcut: "Weekly update"), .running(shortcut: "Weekly update"), .finished(.done)])
         await assertNoSideEffects(r)
     }
 
@@ -195,7 +195,7 @@ final class CommandConfirmTests: CommandTestCase {
         catalog.shortcuts = [CatalogShortcut(name: "Weekly update", askFirst: false)]
         let r = await rig([.text("run weekly update")], catalog: catalog)
         await speakCommand(r)
-        await expectPhases(r, [.listening(.command), .working, .running, .finished(.done)])
+        await expectPhases(r, [.listening, .working, .running(shortcut: "Weekly update"), .finished(.done)])
     }
 
     // MARK: prefix
@@ -289,34 +289,44 @@ final class CommandConfirmTests: CommandTestCase {
 
     // MARK: ordering with dictation
 
+    /// A dictation is mid-cleanup (gated) when a command is spoken. The command must wait for it and
+    /// never cancel it. With `cleanupFails` the gate opens onto a thrown error, so the raw fallback
+    /// is what lands, and the order is asserted the same way.
     func dictationInCleanupThenCommand(cleanupFails: Bool) async {
         let backend = GatedBackend(tokens: ["first ", "dictation"])
+        let failing = FailingAfterGateBackend()
         let history = RecordingHistory()
         let h = makeHarness(
             transcriber: FixtureTranscriber([.text("first dictation"), .text("open Slack")]),
-            backend: cleanupFails ? CountingFailingBackend(counter: Counter()) : backend,
+            backend: cleanupFails ? failing : backend,
             audio: FixtureAudioCapture(buffers: [AudioBuffer(samples: [0.1]), AudioBuffer(samples: [0.2])]),
             history: history, commandInputs: Self.allOn, commandCatalog: T.catalog())
         let phases = await collectPhases(h)
         await h.session.start()
         await h.hotkey.press()
         await h.hotkey.release()
-        if !cleanupFails {
+        if cleanupFails {
+            await waitUntil("cleanup requested") { await failing.requests == 1 }
+        } else {
             await backend.open() // the dictation is mid-cleanup: one token typed, the rest held
             await waitUntil("first chunk") { await h.ax.injectedText() == "first " }
         }
         await h.hotkey.pressCommand()
         await h.hotkey.releaseCommand()
         await waitUntil("command heard") { phases.snapshot().contains(.working) }
-        if !cleanupFails {
-            try? await Task.sleep(for: .milliseconds(30))
-            let early = await h.executor.callCount()
-            XCTAssertEqual(early, 0, "the command waits; it never cancels the dictation")
+        try? await Task.sleep(for: .milliseconds(30))
+        let early = await h.executor.callCount()
+        XCTAssertEqual(early, 0, "the command waits; it never cancels the dictation")
+        if cleanupFails {
+            let typedEarly = await h.ax.injectedText()
+            XCTAssertEqual(typedEarly, "", "nothing has landed while cleanup is pending")
+            await failing.open() // now cleanup throws and the raw fallback lands
+        } else {
             await backend.openAll()
         }
         await waitUntil("command ran") { await h.executor.callCount() == 1 }
         let typed = await h.ax.injectedText()
-        XCTAssertEqual(typed, cleanupFails ? "first dictation" : "first dictation", "dictation landed in full before the command ran")
+        XCTAssertEqual(typed, "first dictation", "dictation landed in full before the command ran")
         await settle(h)
         XCTAssertEqual(phases.snapshot().last, .finished(.done))
     }
@@ -324,17 +334,100 @@ final class CommandConfirmTests: CommandTestCase {
     func test_commandPressDuringCleanup_dictationLandsFirst() async { await dictationInCleanupThenCommand(cleanupFails: false) }
     func test_commandPressDuringCleanup_cleanupFails_rawFallbackStillLands() async { await dictationInCleanupThenCommand(cleanupFails: true) }
 
+    /// The second press lands while the first command is still executing (its idle is still to come).
     func test_commandPressDuringLinger_startsNewSession_noIdleOverIt() async {
-        let r = await rig([.text("send the report to Maria"), .text("open Slack")])
-        await speakCommand(r) // ends in a failure whose capsule lingers in the app
+        let executor = FakeCommandExecutor()
+        await executor.hold()
+        let r = await rig([.text("open Slack"), .text("open Mail")], executor: executor)
         await r.h.hotkey.pressCommand()
+        await r.h.hotkey.releaseCommand()
+        await waitUntil("first executing") { await executor.callCount() == 1 }
+        await r.h.hotkey.pressCommand() // before the first command's idle can be emitted
         await waitUntil("second recording") { r.states.snapshot().filter { $0 == .recording }.count == 2 }
+        await executor.release()
+        await waitUntil("first finished") { r.phases.snapshot().contains(.finished(.done)) }
         try? await Task.sleep(for: .milliseconds(30))
         XCTAssertEqual(r.states.snapshot().last, .recording, "nothing from the finished command lands over the new press")
         await r.h.hotkey.releaseCommand()
         await settle(r.h)
-        let ran = await r.h.executor.callCount()
-        XCTAssertEqual(ran, 1)
+        let ran = await r.h.executor.calls
+        XCTAssertEqual(ran, [.open(T.slack, state: .running), .open(T.mail, state: .notRunning)])
+    }
+
+    // MARK: injection lock around the executor
+
+    /// A Shortcut doesn't hold the lock, so a dictation can land while it runs; the guard is cleared
+    /// again when the executor returns, so "scratch that" is refused (spec: "after any command").
+    func test_scratchThatRefusedWhenADictationLandedWhileAShortcutRan() async {
+        var catalog = T.catalog()
+        catalog.shortcuts = [CatalogShortcut(name: "Weekly update", askFirst: false)]
+        let executor = FakeCommandExecutor()
+        await executor.hold()
+        let r = await rig([.text("run weekly update"), .text("typed meanwhile"), .text("scratch that")], catalog: catalog, executor: executor)
+        await holdCommandKey(r)
+        await waitUntil("shortcut running") { await executor.callCount() == 1 }
+        await r.h.hotkey.press()
+        await r.h.hotkey.release()
+        await waitUntil("dictation landed") { await r.h.ax.injectedText() == "typed meanwhile" }
+        let armedMeanwhile = await r.h.session.scratchGuardArmed()
+        XCTAssertTrue(armedMeanwhile, "the dictation armed the guard while the Shortcut ran")
+        await executor.release()
+        await settle(r.h)
+        let armed = await r.h.session.scratchGuardArmed()
+        XCTAssertFalse(armed, "the executor returning clears it")
+        await speakDictation(r) // "scratch that"
+        let undo = await r.h.undo.callCount()
+        XCTAssertEqual(undo, 0, "no undo sent")
+        let states = await r.states.settled()
+        XCTAssertTrue(states.contains(.error(.undoRefused)), "\(states)")
+    }
+
+    func test_dictationQueuedBehindAnOpenCommandTypesOnlyAfterExecuteReturns() async {
+        let executor = FakeCommandExecutor()
+        await executor.hold()
+        let r = await rig([.text("open Slack"), .text("queued text")], executor: executor)
+        await holdCommandKey(r)
+        await waitUntil("open executing") { await executor.callCount() == 1 }
+        await r.h.hotkey.press()
+        await r.h.hotkey.release()
+        try? await Task.sleep(for: .milliseconds(50))
+        var typed = await r.h.ax.injectedText()
+        XCTAssertEqual(typed, "", "nothing types while the app is being brought forward")
+        XCTAssertFalse(r.phases.snapshot().contains(.finished(.done)))
+        await executor.release()
+        await waitUntil("dictation typed") { await r.h.ax.injectedText() == "queued text" }
+        await settle(r.h)
+        typed = await r.h.ax.injectedText()
+        XCTAssertEqual(typed, "queued text")
+        await expectPhases(r, [.listening, .working, .acting(.open(T.slack, state: .running)), .finished(.done)])
+    }
+
+    // MARK: stuck confirm release
+
+    func test_confirmTapWithLostKeyUp_nextCommandPressBehavesNormally() async {
+        let r = await pendingRig(texts: [.text("run weekly update"), .text("open Slack")])
+        await r.h.hotkey.pressCommand() // the tap; its key-up never arrives
+        await waitUntil("shortcut ran") { await r.h.executor.callCount() == 1 }
+        await settle(r.h)
+        await holdCommandKey(r) // a real press and release
+        await settle(r.h)
+        let calls = await r.h.audio.calls
+        XCTAssertEqual(calls, ["start", "stop", "start", "stop"], "the release stopped the recording; no 15 s cap needed")
+        let ran = await r.h.executor.calls
+        XCTAssertEqual(ran, [shortcut, .open(T.slack, state: .running)])
+    }
+
+    func test_confirmTapDoesNotUnpause() async {
+        let r = await pendingRig()
+        var paused = Settings()
+        paused.paused = true
+        await r.h.settings.save(paused)
+        await r.h.hotkey.pressCommand() // the tap
+        await waitUntil("shortcut ran") { await r.h.executor.callCount() == 1 }
+        await r.h.hotkey.releaseCommand()
+        await settle(r.h)
+        let after = await r.h.settings.load().paused
+        XCTAssertTrue(after, "a confirm tap is not a press that wakes the mic")
     }
 
     // MARK: 15 s cap
@@ -353,7 +446,7 @@ final class CommandConfirmTests: CommandTestCase {
         await settle(r.h)
         calls = await r.h.audio.calls
         XCTAssertEqual(calls, ["start", "stop"])
-        await expectPhases(r, [.listening(.command), .working, .acting(.open(T.slack, state: .running)), .finished(.done)])
+        await expectPhases(r, [.listening, .working, .acting(.open(T.slack, state: .running)), .finished(.done)])
         let ran = await r.h.executor.callCount()
         XCTAssertEqual(ran, 1)
     }
@@ -434,4 +527,36 @@ final class ManualSleeper: @unchecked Sendable {
         await withCheckedContinuation { c in lock.withLock { waiters.append(c) } }
     }
     func fire(_ i: Int) { lock.withLock { waiters[i] }.resume() }
+}
+
+/// Cleanup that waits for the test, then throws, so the raw fallback is what lands.
+actor FailingAfterGateBackend: CleanupBackend {
+    private(set) var requests = 0
+    private var opened = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func open() {
+        opened = true
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending { waiter.resume() }
+    }
+
+    private func wait() async {
+        if opened { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    private func note() { requests += 1 }
+
+    nonisolated func clean(_ request: CleanupRequest) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                await self.note()
+                await self.wait()
+                continuation.finish(throwing: FakeError(label: "cleanup down"))
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
 }
