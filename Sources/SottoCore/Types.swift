@@ -130,8 +130,12 @@ public struct DictionaryTerm: Sendable, Equatable, Hashable, Codable {
 }
 
 public enum HotkeyEvent: Sendable, Equatable {
+    /// The dictation key. It always dictates.
     case pressed
     case released
+    /// The command key: command mode from key-down, and the confirm tap for a pending Shortcut.
+    case commandPressed
+    case commandReleased
 }
 
 /// Drives the floating indicator (docs/ui-spec.md §1.4). `DictationSession` is the only writer.
