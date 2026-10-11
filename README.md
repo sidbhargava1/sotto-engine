@@ -38,7 +38,7 @@ Logs carry word counts and timings, never text. There is no history store; the s
 ## Install
 
 ```swift
-.package(url: "https://github.com/sidbhargava1/sotto-engine", .upToNextMinor(from: "0.4.0")),
+.package(url: "https://github.com/sidbhargava1/sotto-engine", .upToNextMinor(from: "0.5.0")),
 ```
 
 Then depend on `SottoCore` (pure logic and protocols) and `SottoEngine` (the macOS adapters). llama.cpp ships as a prebuilt `llama.xcframework` attached to each release, which SwiftPM fetches and verifies by checksum; you don't need cmake. To build it from source instead, run `scripts/build-llama.sh` in a checkout: a `Vendor/llama.xcframework` there takes precedence.
@@ -179,7 +179,7 @@ for await phase in await session.commandPhaseUpdates() { ... }                  
 - `commandPhaseUpdates()` and `stateUpdates()` are separate streams with no ordering guarantee between them. Take press mode (dictation or command) from your own key-down, not from whichever stream speaks first.
 - `SessionState` stays `.transcribing` through the confirm wait and the executor; `.idle` follows `CommandPhase.finished`.
 - A command press with no speech ends the phase stream at `working`; the outcome arrives as `SessionState.error`.
-- Versioning: the new `HotkeyEvent` cases break exhaustive `switch`es over it, so this ships as 0.4.0.
+- Versioning: the new `HotkeyEvent` cases break exhaustive `switch`es over it, so this ships as 0.5.0.
 - A command press during a dictation that is still being cleaned up does not cancel it: the dictation lands first, then the command runs.
 
 ## Copy-ahead decoding
