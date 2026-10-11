@@ -12,7 +12,7 @@ The pipeline is hear → understand → type, and every stage is a protocol you 
 - **Understand.** A local cleanup pass removes fillers, adds punctuation, resolves self-corrections ("Tuesday, no, Wednesday") and turns clearly spoken lists into lists. It runs Qwen3-4B-Instruct in-process through llama.cpp, with the system prompt kept in the KV cache between utterances. If cleanup fails or stalls, you get the raw transcript, never nothing.
 - **Type.** Text is inserted at the caret through the Accessibility API (`kAXSelectedTextAttribute`), so it never replaces what's already in the field. Paste and Unicode typing are the fallbacks; the clipboard is the last resort. Injection never presses Return, so dictating into a shell can't run a command.
 - **Dictionary.** A plain list of names and terms that the cleanup prompt spells your way, plus heard-as rewrites for words the recogniser gets wrong.
-- **Voice commands.** "Scratch that" undoes the last dictation with a guarded ⌘Z: only in the same app and the same text field, only within 30 seconds, and never in a terminal. Commands are matched on the raw transcript, before cleanup.
+- **Voice commands.** Spoken app commands: see below. "Scratch that" undoes the last dictation with a guarded ⌘Z: only in the same app and the same text field, only within 30 seconds, and never in a terminal. Commands are matched on the raw transcript, before cleanup.
 
 ## Privacy
 
@@ -131,6 +131,30 @@ sotto transcribe memo.wav --raw       # skip the cleanup model; print the transc
 ```
 
 Text goes to stdout and status to stderr, so `sotto dictate | pbcopy` works. The CLI never downloads on its own: add `--download` the first time to fetch the models into `~/Library/Application Support/sotto-engine/Models/`. Exit codes follow sysexits (64 usage, 66 bad input, 69 model missing, 77 microphone denied; 1 when nothing was recognised). Full reference: [CLI.md](CLI.md).
+
+## Spoken app commands
+
+`SottoCore` ships the grammar and resolver for commands like "open Slack", "switch to Mail", "hide Safari", "open invoices" and "run Weekly update". It is pure text and data: no AppKit, no system calls. The host supplies a `CommandCatalog` (installed apps, which are running and frontmost, named folders and links, the Shortcuts in an allowed folder) and implements `CommandExecuting`; identifiers and targets in the catalogue are opaque strings the engine never interprets.
+
+```swift
+// The transcript must already have been through DictionaryRewriter.rewrite: heard-as variants
+// are the only alias source ("open fleet view" -> "open FleetView").
+switch CommandRouter.routeCommandKey(text, catalog: catalog) {          // dedicated command key
+case .resolved(let command): let outcome = await executor.execute(command)
+case .failed(let failure): break                                        // type nothing, show the failure
+}
+
+switch CommandRouter.routeDictationKey(text, catalog: catalog, prefixEnabled: true) {  // "Sotto, open Slack"
+case .scratchThat, .dictation, .command, .commandError: break
+}
+```
+
+- Verbs: open/launch, switch to/go to, hide, run/run shortcut; "open folder X" and "open link X" force the kind. Filler ("can you", "please", "for me") and a leading "Sotto," on the command key are ignored. Deictic targets ("this app", "it"), a missing object and targets over four words are `.unrecognised`, never named.
+- Names compare with spaces, hyphens and punctuation removed. An exact name wins, otherwise a whole-word part of exactly one app name ("chrome" is Google Chrome); two or more is `.ambiguous`. A named folder or link beats a same-named app for "open". Kinds never cross.
+- `ResolvedCommand` has `.open(app, state:)` ("open", "launch"), `.switchTo(app, state:)` ("switch to", "go to"), `.hide`, `.openFolder`, `.openLink` and `.runShortcut(CatalogShortcut)` (which carries `askFirst`). Copy is driven by `CommandAppState`, not the case: `notRunning` is "Opening", `running` is "Switching to", `frontmost` is "Already in". The case is kept for per-verb counters, and `ResolvedCommand.verb` gives the `CommandVerb`.
+- Input past 2,000 characters or 32 words is never scanned: it is `.unrecognised` on the command key and `.dictation` on the dictation key.
+- `CommandFailure` and `ParsedCommand` carry heard text; never interpolate them into logs. Log or count `CommandFailure.kind` (`CommandFailure.Kind`, a closed payload-free enum).
+- On the dictation key the order is exact "scratch that" (`CommandParser`), then the command grammar, then dictation. The wake word (sotto, soto, so to) must be the first word and only filler may sit between it and the verb. An unresolved target of two words or fewer is `.commandError`; anything longer, or no prefix, is `.dictation` with the text unchanged.
 
 ## Copy-ahead decoding
 
