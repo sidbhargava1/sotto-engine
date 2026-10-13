@@ -133,8 +133,17 @@ public final class AVAudioEngineCapture: AudioCapturing, @unchecked Sendable {
             }
         }
 
-        func since(_ mark: Int) -> [Float] {
-            let count = min(written - mark, buffer.count)  // stuck hotkey: keep the newest `seconds`
+        /// Reads that wanted more than the ring holds (oldest audio lost), and the samples lost.
+        /// Tests and `stop()` read these; they are never reset by the ring itself.
+        var overflowCount = 0
+        var droppedSamples = 0
+
+        mutating func since(_ mark: Int) -> [Float] {
+            if written - mark > buffer.count {
+                overflowCount += 1
+                droppedSamples += written - mark - buffer.count
+            }
+            let count = min(written - mark, buffer.count)  // too-long hold or stuck hotkey: keep the newest `seconds`
             guard count > 0 else { return [] }
             let start = written - count
             return (start..<written).map { buffer[$0 % buffer.count] }
@@ -587,7 +596,11 @@ public final class AVAudioEngineCapture: AudioCapturing, @unchecked Sendable {
             self?.state.withLock { ring in ring.mark.map { ring.written > $0 } ?? true || !ring.carried.isEmpty } ?? true
         }
         if !got { log.notice("stop: no buffer since the mark after \(Int((AudioWake.stopGrace / .milliseconds(1)).rounded()), privacy: .public)ms") }
+        var dropped = 0
+        var ringRate = 0.0
         let (samples, rate, carried) = try state.withLock { ring -> ([Float], Double, [Float]) in
+            let before = ring.droppedSamples
+            defer { dropped = ring.droppedSamples - before; ringRate = ring.rate }
             // mark is nil only if a restart failed mid-record; return what was banked.
             guard let mark = ring.mark else {
                 if ring.carried.isEmpty { throw Failure.notRecording }
@@ -599,6 +612,10 @@ public final class AVAudioEngineCapture: AudioCapturing, @unchecked Sendable {
                 ring.carried = []
             }
             return (ring.since(mark), ring.rate, ring.carried)
+        }
+        if dropped > 0 {
+            // Counts only, no audio or text. The ring is shorter than the hold: raise `ringSeconds`.
+            log.error("capture ring overflow: dropped \(dropped, privacy: .public) samples (\(Double(dropped) / max(ringRate, 1), privacy: .public) s) of the oldest audio; ring is \(self.ringSeconds, privacy: .public) s")
         }
         // Display only: the session says "No audio from …" if nothing transcribes.
         var silent: SottoCore.AudioBuffer.SilentInput?

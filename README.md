@@ -193,7 +193,13 @@ struct MySink: UtteranceSink {
     func failed(_ reason: ErrorReason, clock: UtteranceClock) async { /* yours */ }
 }
 
-let session = DictationSession(/* ... */, divertSink: MySink(), maxDivertedDuration: .seconds(180))
+// The capture is built first, so derive its ring from the same constants the session gets.
+// Whole seconds rounded up, plus 1 s headroom for the tap's buffer granularity.
+let maxRecording = Duration.seconds(60), maxDiverted = Duration.seconds(180)
+let ringSeconds = Double((maxRecording + maxDiverted).components.seconds) + 1
+let capture = AVAudioEngineCapture(log: log, ringSeconds: ringSeconds)
+let session = DictationSession(/* capture, ... */, divertSink: MySink(),
+                               maxRecordingDuration: maxRecording, maxDivertedDuration: maxDiverted)
 // Later, while a dictation press is down, yield it on the same stream as the other edges:
 edges.yield(.divert)
 ```

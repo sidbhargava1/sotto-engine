@@ -48,6 +48,20 @@ final class CaptureChunkCursorTests: XCTestCase {
         XCTAssertEqual(AVAudioEngineCapture.Ring().seconds, 90, "default is unchanged")
     }
 
+    func test_ringOverflowSignal_firesOnlyWhenOldestAudioIsLost() {
+        var ring = AVAudioEngineCapture.Ring(seconds: 2)
+        ring.reset(rate: 100)
+        ring.append(ramp(0..<150))
+        _ = ring.since(0)
+        _ = ring.since(50)  // exactly fills the ring
+        XCTAssertEqual(ring.overflowCount, 0)
+        XCTAssertEqual(ring.droppedSamples, 0)
+        ring.append(ramp(150..<500))
+        _ = ring.since(0)
+        XCTAssertEqual(ring.overflowCount, 1)
+        XCTAssertEqual(ring.droppedSamples, 300)
+    }
+
     func test_deltasFromTheMark_noOverlap() throws {
         var ring = AVAudioEngineCapture.Ring()
         ring.reset(rate: 16_000)
