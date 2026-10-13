@@ -1,5 +1,5 @@
 // Engine starts at launch and stays warm for a grace period after each dictation, then sleeps
-// until the next press (SPEC §5 step 2). The tap writes native-rate mono into a 90s ring; a warm
+// until the next press (SPEC §5 step 2). The tap writes native-rate mono into a ring (90s default); a warm
 // start() only marks an offset with 150ms pre-roll. A press on a sleeping engine pays the cold
 // start, waits for the tap to carry real audio (AudioWake), and has no pre-roll. Bluetooth inputs
 // never sleep (AudioIdleSleep): their wake is an HFP route switch.
@@ -12,16 +12,22 @@ import os
 public final class AVAudioEngineCapture: AudioCapturing, @unchecked Sendable {
     public enum Failure: Error { case micDenied, notRecording, deviceSwitch(OSStatus) }
 
-    private static let ringSeconds: Double = 90
+    /// Default ring length. ~0.19 MB per second at 48 kHz Float32 (about 17 MB at 90 s); a longer
+    /// ring is what lets a single hold exceed 90 s without dropping its start.
+    public static let defaultRingSeconds: Double = 90
+    private let ringSeconds: Double
     private let log: Logger
     // @unchecked: `engine` is only touched from prewarm/configuration-change on the main actor;
     // all tap/start/stop state lives behind `state`.
     private let engine = AVAudioEngine()
-    private let state = Mutex(Ring())
+    private let state: Mutex<Ring>
 
     /// `preferredInputUID`: the mic to open (nil follows the macOS default); change it later
     /// with `selectInput(uid:)`.
-    public init(log: LogSubsystem, preferredInputUID: String? = nil) {
+    /// `ringSeconds`: the longest hold kept whole; must cover the session's longest cap.
+    public init(log: LogSubsystem, preferredInputUID: String? = nil, ringSeconds: Double = AVAudioEngineCapture.defaultRingSeconds) {
+        self.ringSeconds = max(1, ringSeconds)
+        state = Mutex(Ring(seconds: self.ringSeconds))
         self.log = log.logger("audio")
         selection = InputSelection(preferred: preferredInputUID)
     }
@@ -59,6 +65,7 @@ public final class AVAudioEngineCapture: AudioCapturing, @unchecked Sendable {
     }
 
     struct Ring {  // internal for SottoTests (chunk cursor across restarts)
+        var seconds = AVAudioEngineCapture.defaultRingSeconds
         var buffer: [Float] = []
         var rate: Double = 0
         var written = 0  // monotonic sample count; index = written % buffer.count
@@ -111,7 +118,7 @@ public final class AVAudioEngineCapture: AudioCapturing, @unchecked Sendable {
 
         mutating func reset(rate: Double) {
             self.rate = rate
-            buffer = [Float](repeating: 0, count: Int(rate * AVAudioEngineCapture.ringSeconds))
+            buffer = [Float](repeating: 0, count: Int(rate * seconds))
             written = 0
             floor = 0
         }
@@ -125,7 +132,7 @@ public final class AVAudioEngineCapture: AudioCapturing, @unchecked Sendable {
         }
 
         func since(_ mark: Int) -> [Float] {
-            let count = min(written - mark, buffer.count)  // stuck hotkey: keep the newest 90s
+            let count = min(written - mark, buffer.count)  // stuck hotkey: keep the newest `seconds`
             guard count > 0 else { return [] }
             let start = written - count
             return (start..<written).map { buffer[$0 % buffer.count] }

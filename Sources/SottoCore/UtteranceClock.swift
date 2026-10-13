@@ -2,12 +2,12 @@ import Foundation
 
 /// Timestamps for one utterance's latency line and history row. Written from the delivery task
 /// and the first-token relay, hence the lock.
-final class UtteranceClock: @unchecked Sendable {
+public final class UtteranceClock: @unchecked Sendable {
     private let lock = NSLock()
     private let releasedAt: ContinuousClock.Instant
     private let pressedAt: ContinuousClock.Instant
     /// Wall clock at hotkey down: the row's `started_at` (SPEC §15.2).
-    let startedAt: Date
+    public let startedAt: Date
     private var _sttDone: ContinuousClock.Instant?
     private var firstToken: ContinuousClock.Instant?
     private var firstInject: ContinuousClock.Instant?
@@ -18,6 +18,9 @@ final class UtteranceClock: @unchecked Sendable {
         self.startedAt = startedAt
         self.releasedAt = releasedAt
     }
+
+    /// How long the key was held, press to release.
+    public var heldDuration: Duration { releasedAt - pressedAt }
 
     var sttDone: ContinuousClock.Instant? {
         get { lock.withLock { _sttDone } }

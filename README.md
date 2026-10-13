@@ -182,6 +182,27 @@ for await phase in await session.commandPhaseUpdates() { ... }                  
 - Versioning: the new `HotkeyEvent` cases break exhaustive `switch`es over it, so this ships as 0.5.0.
 - A command press during a dictation that is still being cleaned up does not cancel it: the dictation lands first, then the command runs.
 
+## Diverting an utterance
+
+A host can turn a dictation press into a "diverted" utterance mid-hold, for example when the user adds a modifier key while talking. Recording carries on uninterrupted; on release the raw transcript goes to your sink instead of command matching, cleanup, injection, the clipboard and history.
+
+```swift
+struct MySink: UtteranceSink {
+    func receive(_ rawTranscript: String, clock: UtteranceClock) async { /* yours */ }
+}
+
+let session = DictationSession(/* ... */, divertSink: MySink(), maxDivertedDuration: .seconds(180))
+// Later, while a dictation press is down, yield it on the same stream as the other edges:
+edges.yield(.divert)
+```
+
+- `.divert` is ignored without a sink, when nothing is recording, during a command press, and once already diverted, so key autorepeat is harmless.
+- Displayed partials end (the partial stream emits `nil`) and the recording cap becomes `maxDivertedDuration`, measured from the divert.
+- States emitted: `.recording` (at the press, as usual), then on release `.transcribing`, then `.idle` once the transcript is non-empty and handed over. Nothing is emitted while the sink works. Empty speech, STT failure and a missing model emit their usual `.error(...)` then `.idle`, and the sink is not called. No raw-transcript snapshot is published.
+- `UtteranceClock` exposes `startedAt` and `heldDuration`.
+- `AVAudioEngineCapture(log:ringSeconds:)` sets how much audio the capture ring keeps (default 90 s, about 0.19 MB per second at 48 kHz Float32, so 180 s is about 35 MB). Set it at least as long as the longest cap in use.
+- Versioning: `HotkeyEvent.divert` breaks exhaustive `switch`es over it.
+
 ## Copy-ahead decoding
 
 Cleanup output is nearly a copy of the transcript, so `LlamaEngine` guesses the next few tokens by copying from the prompt and has the model verify them in one batch with greedy sampling. The text is the same as one-token-at-a-time decoding; verified byte-identical on 103 transcripts on Apple silicon (M-series), though batched verification can differ in the last float bits on other GPUs. It needs llama.cpp b11404 or later (the engine's pinned b11514 qualifies) and a model whose memory can drop part of a sequence: recurrent and hybrid models run without it. Hosts decide with `LlamaBackend.make(..., speculation:)` (default on); `SOTTO_SPECULATION=0` in the environment is a debug override that turns it off.

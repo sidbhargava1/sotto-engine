@@ -37,6 +37,8 @@ public actor DictationSession {
     /// Times the command-key recording cap and the confirm timeout; tests drive it with `TestClock`.
     let commandSleep: Deadline.Sleeper
     let maxCommandRecordingDuration: Duration
+    private let divertSink: (any UtteranceSink)?
+    private let maxDivertedDuration: Duration
     /// Asked once per press, after capture starts: false means nothing is displayed beyond the
     /// capsule (Classic theme, or the mascot suppressed), so no partials and no raw snapshot.
     private let displayGate: @Sendable () async -> Bool
@@ -111,7 +113,9 @@ public actor DictationSession {
         commandExecutor: (any CommandExecuting)? = nil,
         commandRewrite: (@Sendable (String) async -> String)? = nil,
         commandSleep: @escaping Deadline.Sleeper = Deadline.realSleep,
-        maxCommandRecordingDuration: Duration = .seconds(15)
+        maxCommandRecordingDuration: Duration = .seconds(15),
+        divertSink: (any UtteranceSink)? = nil,
+        maxDivertedDuration: Duration = .seconds(180)
     ) {
         self.hotkey = hotkey
         self.audio = audio
@@ -147,6 +151,8 @@ public actor DictationSession {
         }
         self.commandSleep = commandSleep
         self.maxCommandRecordingDuration = maxCommandRecordingDuration
+        self.divertSink = divertSink
+        self.maxDivertedDuration = maxDivertedDuration
     }
 
     public func start() {
@@ -248,7 +254,7 @@ public actor DictationSession {
             decideConfirm(.cancelled) // a dictation press answers a pending confirm with "no"
             await handlePressed(await unpausedSettings(), kind: .dictation, inputs: inputs)
         case .released: // not gated: pausing mid-hold must still end the recording
-            if recordingKind == .dictation { await handleReleased() }
+            if recordingKind == .dictation || recordingKind == .diverted { await handleReleased() }
         case .commandPressed:
             let inputs = await commandInputsProvider()
             guard commandExecutor != nil, inputs.commandsEnabled, inputs.commandKeyEnabled else { return }
@@ -263,6 +269,8 @@ public actor DictationSession {
                 return
             }
             if recordingKind == .command { await handleReleased() }
+        case .divert:
+            divertRecording()
         }
     }
 
@@ -315,6 +323,16 @@ public actor DictationSession {
         }
     }
 
+    /// Delivered through the ordered event stream, so it can't land before `handlePressed` set
+    /// `isRecording`. Capture is untouched; only partials, the cap and the final routing change.
+    private func divertRecording() {
+        guard divertSink != nil, isRecording, recordingKind == .dictation else { return }
+        recordingKind = .diverted
+        cancelPartials()
+        recordingGeneration += 1 // retires the dictation cap and any in-flight partial
+        scheduleMaxDurationCap(generation: recordingGeneration, after: maxDivertedDuration)
+    }
+
     /// Starts at the capture mark; `handleReleased` cancels it before anything else so the final
     /// pass never queues behind a partial on the ANE (RESULTS.md "Frame budget").
     private func startPartials(_ engine: any Transcribing, generation: Int) {
@@ -349,9 +367,10 @@ public actor DictationSession {
         emitPartial(nil)
     }
 
-    private func scheduleMaxDurationCap(generation: Int) {
+    private func scheduleMaxDurationCap(generation: Int, after duration: Duration? = nil) {
+        let duration = duration ?? maxRecordingDuration
         Task {
-            try? await Task.sleep(for: maxRecordingDuration)
+            try? await Task.sleep(for: duration)
             await self.forceStopIfStillRecording(generation: generation)
         }
     }
@@ -461,6 +480,11 @@ public actor DictationSession {
         }
         if kind == .command {
             await runCommandKeyUtterance(normalized, inputs: inputs)
+            return
+        }
+        if kind == .diverted, let divertSink { // the host owns everything from here
+            if !isRecording { emit(.idle) }
+            await divertSink.receive(normalized, clock: clock)
             return
         }
         // A newer utterance already recording owns the bubble (DS-02).

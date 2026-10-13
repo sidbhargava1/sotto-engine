@@ -39,6 +39,15 @@ final class StreamingResamplerTests: XCTestCase {
 final class CaptureChunkCursorTests: XCTestCase {
     private func ramp(_ range: Range<Int>) -> [Float] { range.map(Float.init) }
 
+    func test_ringLengthIsHonoured_byResetAndSince() {
+        var ring = AVAudioEngineCapture.Ring(seconds: 2)
+        ring.reset(rate: 100)
+        XCTAssertEqual(ring.buffer.count, 200)
+        ring.append(ramp(0..<500))
+        XCTAssertEqual(ring.since(0), ramp(300..<500), "keeps only the newest `seconds`")
+        XCTAssertEqual(AVAudioEngineCapture.Ring().seconds, 90, "default is unchanged")
+    }
+
     func test_deltasFromTheMark_noOverlap() throws {
         var ring = AVAudioEngineCapture.Ring()
         ring.reset(rate: 16_000)

@@ -21,6 +21,7 @@ actor FakeHotkeyMonitor: HotkeyMonitoring {
     func release() { yielded += 1; continuation.yield(.released) }
     func pressCommand() { yielded += 1; continuation.yield(.commandPressed) }
     func releaseCommand() { yielded += 1; continuation.yield(.commandReleased) }
+    func divert() { yielded += 1; continuation.yield(.divert) }
 }
 
 actor FixtureAudioCapture: AudioCapturing {
@@ -539,4 +540,20 @@ final class PhaseLog: @unchecked Sendable {
     private var phases: [CommandPhase] = []
     func append(_ phase: CommandPhase) { lock.withLock { phases.append(phase) } }
     func snapshot() -> [CommandPhase] { lock.withLock { phases } }
+}
+
+/// Captures what a diverted utterance delivers to the host.
+final class RecordingSink: UtteranceSink, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _received: [String] = []
+    private var _held: [Duration] = []
+    var received: [String] { lock.withLock { _received } }
+    var held: [Duration] { lock.withLock { _held } }
+
+    func receive(_ rawTranscript: String, clock: UtteranceClock) async {
+        lock.withLock {
+            _received.append(rawTranscript)
+            _held.append(clock.heldDuration)
+        }
+    }
 }
