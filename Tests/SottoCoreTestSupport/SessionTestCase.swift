@@ -22,6 +22,11 @@ class SessionTestCase: XCTestCase {
         let settings: InMemorySettings
         let clipboard: FakeClipboard
         let undo: FakeUndo
+        let clock: TestClock
+        /// Voice commands: the fake executor, and the inputs and catalogue the session reads.
+        let executor: FakeCommandExecutor
+        let commandInputs: CommandBox<CommandInputs>
+        let catalog: CommandBox<CommandCatalog>
     }
 
     func makeHarness(
@@ -48,8 +53,15 @@ class SessionTestCase: XCTestCase {
         sleep: @escaping Deadline.Sleeper = Deadline.realSleep,
         chain: ((_ ax: RecordingInjector, _ paste: RecordingInjector, _ unicode: RecordingInjector) -> InjectorChain)? = nil,
         injectionPolicy: (any InjectionPolicy)? = nil,
-        voiceCommands: Bool = true
+        voiceCommands: Bool = true,
+        commandInputs initialInputs: CommandInputs = .disabled,
+        commandCatalog initialCatalog: CommandCatalog = CommandCatalog(),
+        executor: FakeCommandExecutor = FakeCommandExecutor(),
+        maxCommandRecordingDuration: Duration = .seconds(15),
+        commandSleep: Deadline.Sleeper? = nil
     ) -> Harness {
+        let commandInputs = CommandBox(initialInputs)
+        let catalog = CommandBox(initialCatalog)
         let hotkey = FakeHotkeyMonitor()
         let ax = RecordingInjector(outcomes: axOutcomes)
         let paste = RecordingInjector(outcomes: pasteOutcomes)
@@ -79,9 +91,21 @@ class SessionTestCase: XCTestCase {
             onTiming: onTiming,
             livePartials: livePartials,
             displayGate: displayGate,
-            voiceCommands: voiceCommands
+            voiceCommands: voiceCommands,
+            commandInputs: { commandInputs.value },
+            commandCatalog: { catalog.value },
+            commandExecutor: executor,
+            commandSleep: commandSleep ?? { await clock.sleep($0) },
+            maxCommandRecordingDuration: maxCommandRecordingDuration
         )
-        return Harness(session: session, hotkey: hotkey, audio: audio, transcriber: transcriber, ax: ax, paste: paste, unicode: unicode, context: context, settings: settings, clipboard: clipboard, undo: undo)
+        return Harness(session: session, hotkey: hotkey, audio: audio, transcriber: transcriber, ax: ax, paste: paste, unicode: unicode, context: context, settings: settings, clipboard: clipboard, undo: undo, clock: clock, executor: executor, commandInputs: commandInputs, catalog: catalog)
+    }
+
+    func collectPhases(_ h: Harness) async -> PhaseLog {
+        let log = PhaseLog()
+        let stream = await h.session.commandPhaseUpdates()
+        Task { for await phase in stream { log.append(phase) } }
+        return log
     }
 
     func collectStates(_ h: Harness) async -> StateLog {

@@ -19,6 +19,8 @@ actor FakeHotkeyMonitor: HotkeyMonitoring {
     nonisolated func events() -> AsyncStream<HotkeyEvent> { stream }
     func press() { yielded += 1; continuation.yield(.pressed) }
     func release() { yielded += 1; continuation.yield(.released) }
+    func pressCommand() { yielded += 1; continuation.yield(.commandPressed) }
+    func releaseCommand() { yielded += 1; continuation.yield(.commandReleased) }
 }
 
 actor FixtureAudioCapture: AudioCapturing {
@@ -385,12 +387,58 @@ final class StateLog: @unchecked Sendable {
 }
 
 final class TestClock: @unchecked Sendable {
+    private struct Sleeper {
+        let id: UUID
+        let deadline: Duration
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
     private let lock = NSLock()
     private let base = ContinuousClock.now
     private var offset: Duration = .zero
+    private var sleepers: [Sleeper] = []
 
-    func advance(_ by: Duration) { lock.withLock { offset += by } }
+    /// Moves time forward and wakes every `sleep` whose deadline has been reached, in deadline order.
+    func advance(_ by: Duration) {
+        let due = lock.withLock { () -> [Sleeper] in
+            offset += by
+            let due = sleepers.filter { $0.deadline <= offset }.sorted { $0.deadline < $1.deadline }
+            sleepers.removeAll { $0.deadline <= offset }
+            return due
+        }
+        for sleeper in due { sleeper.continuation.resume() }
+    }
     func now() -> ContinuousClock.Instant { lock.withLock { base + offset } }
+
+    /// A `Deadline.Sleeper` on virtual time: returns when `advance` reaches the deadline, or at once
+    /// if the task is cancelled (callers check `Task.isCancelled`, as the session does).
+    @Sendable func sleep(_ duration: Duration) async {
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let immediate = lock.withLock { () -> Bool in
+                    if duration <= .zero { return true }
+                    sleepers.append(Sleeper(id: id, deadline: offset + duration, continuation: continuation))
+                    return false
+                }
+                if immediate || Task.isCancelled { wake(id, orNow: immediate, continuation) }
+            }
+        } onCancel: {
+            wake(id)
+        }
+    }
+
+    /// Sleeps currently waiting on this clock: lets a test know a timer is armed.
+    var pendingSleeps: Int { lock.withLock { sleepers.count } }
+
+    private func wake(_ id: UUID, orNow immediate: Bool = false, _ continuation: CheckedContinuation<Void, Never>? = nil) {
+        if immediate { continuation?.resume(); return }
+        let found = lock.withLock { () -> Sleeper? in
+            guard let index = sleepers.firstIndex(where: { $0.id == id }) else { return nil }
+            return sleepers.remove(at: index)
+        }
+        found?.continuation.resume()
+    }
 }
 
 /// A generic `HistoryRecording` hook: captures what the session offers, behind a fixed gate.
@@ -445,4 +493,50 @@ final class EventLog<Event: Sendable>: @unchecked Sendable {
     func append(_ event: Event) { lock.withLock { events.append(event) } }
     var all: [Event] { lock.withLock { events } }
     func snapshot() -> [Event] { all }
+}
+
+/// A `CommandExecuting` that records every call. `hold()` makes calls wait until `release()`, like a
+/// Shortcut that is still running; `outcome` stands in for a host failure (the protocol can't throw).
+actor FakeCommandExecutor: CommandExecuting {
+    private(set) var calls: [ResolvedCommand] = []
+    private var outcome: CommandOutcome
+    private var gated = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(outcome: CommandOutcome = .done) { self.outcome = outcome }
+
+    func setOutcome(_ outcome: CommandOutcome) { self.outcome = outcome }
+    func hold() { gated = true }
+    func release() {
+        gated = false
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending { waiter.resume() }
+    }
+
+    func execute(_ command: ResolvedCommand) async -> CommandOutcome {
+        calls.append(command)
+        if gated { await withCheckedContinuation { waiters.append($0) } }
+        return outcome
+    }
+    func callCount() -> Int { calls.count }
+}
+
+/// Mutable host inputs for command tests: read through a closure, changed between presses.
+final class CommandBox<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value: Value
+    init(_ value: Value) { _value = value }
+    var value: Value {
+        get { lock.withLock { _value } }
+        set { lock.withLock { _value = newValue } }
+    }
+}
+
+/// Records every `CommandPhase`. Like `StateLog`, the listener runs in its own task.
+final class PhaseLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var phases: [CommandPhase] = []
+    func append(_ phase: CommandPhase) { lock.withLock { phases.append(phase) } }
+    func snapshot() -> [CommandPhase] { lock.withLock { phases } }
 }

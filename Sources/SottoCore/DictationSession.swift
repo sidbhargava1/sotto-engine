@@ -4,7 +4,7 @@ import Foundation
 import os
 
 public actor DictationSession {
-    private let log: Logger
+    let log: Logger
 
     private let hotkey: any HotkeyMonitoring
     private let audio: any AudioCapturing
@@ -29,14 +29,29 @@ public actor DictationSession {
     private let livePartials: Bool
     /// False for hosts with no "last dictation" to undo (the `sotto` CLI): every transcript is text.
     private let voiceCommands: Bool
+    // Voice commands (CommandSession.swift). All default to "off", which leaves dictation untouched.
+    let commandInputsProvider: @Sendable () async -> CommandInputs
+    let commandCatalogProvider: @Sendable () async -> CommandCatalog
+    let commandExecutor: (any CommandExecuting)?
+    let commandRewrite: @Sendable (String) async -> String
+    /// Times the command-key recording cap and the confirm timeout; tests drive it with `TestClock`.
+    let commandSleep: Deadline.Sleeper
+    let maxCommandRecordingDuration: Duration
     /// Asked once per press, after capture starts: false means nothing is displayed beyond the
     /// capsule (Classic theme, or the mascot suppressed), so no partials and no raw snapshot.
     private let displayGate: @Sendable () async -> Bool
     private let pressProbeDeadline: Duration
     private let sleep: Deadline.Sleeper  // injectable so the press-probe deadline is testable
-    private let injectionLock = AsyncLock()
+    let injectionLock = AsyncLock()
 
-    private var isRecording = false
+    var isRecording = false
+    var recordingKind = TriggerKind.dictation
+    var recordingInputs = CommandInputs.disabled
+    var commandCapTask: Task<Void, Never>?
+    var pendingConfirm: PendingConfirm?
+    /// Set by the key-down that confirmed, so its release does nothing.
+    var ignoreCommandRelease = false
+    var commandContinuations: [UUID: AsyncStream<CommandPhase>.Continuation] = [:]
     private var recordingSettings = Settings()
     private var recordingGeneration = 0
     private var pressedAt: (instant: ContinuousClock.Instant, wall: Date)?
@@ -52,12 +67,12 @@ public actor DictationSession {
     private var inFlightEvents = 0
     private var handledEvents = 0
     private var drainWaiters: [CheckedContinuation<Void, Never>] = []
-    private var lastInjection: LastInjection?
+    var lastInjection: LastInjection?
     private var idleSleepTask: Task<Void, Never>?
     private var audioAsleep = false
     private var sleeping: Task<Void, Never>?  // a press waits for it, so wake never precedes sleep
 
-    private struct LastInjection {
+    struct LastInjection {
         let bundleID: String?
         let elementToken: AXElementToken?
         let isTerminalClass: Bool
@@ -90,7 +105,13 @@ public actor DictationSession {
         livePartials: Bool = true,
         displayGate: @escaping @Sendable () async -> Bool = { true },
         logSubsystem: LogSubsystem = .engine,
-        voiceCommands: Bool = true
+        voiceCommands: Bool = true,
+        commandInputs: @escaping @Sendable () async -> CommandInputs = { .disabled },
+        commandCatalog: @escaping @Sendable () async -> CommandCatalog = { CommandCatalog() },
+        commandExecutor: (any CommandExecuting)? = nil,
+        commandRewrite: (@Sendable (String) async -> String)? = nil,
+        commandSleep: @escaping Deadline.Sleeper = Deadline.realSleep,
+        maxCommandRecordingDuration: Duration = .seconds(15)
     ) {
         self.hotkey = hotkey
         self.audio = audio
@@ -117,6 +138,15 @@ public actor DictationSession {
         self.sleep = sleep
         self.log = logSubsystem.logger("session")
         self.voiceCommands = voiceCommands
+        self.commandInputsProvider = commandInputs
+        self.commandCatalogProvider = commandCatalog
+        self.commandExecutor = commandExecutor
+        // Heard-as variants are the only alias source, so the default is the user's dictionary.
+        self.commandRewrite = commandRewrite ?? { text in
+            DictionaryRewriter.rewrite(text, terms: (try? await dictionaryStore.load()) ?? [])
+        }
+        self.commandSleep = commandSleep
+        self.maxCommandRecordingDuration = maxCommandRecordingDuration
     }
 
     public func start() {
@@ -135,6 +165,7 @@ public actor DictationSession {
     public func stopMonitoring() {
         runTask?.cancel()
         runTask = nil
+        decideConfirm(.cancelled) // a pending confirm is released, never left waiting
     }
 
     public func stateUpdates() -> AsyncStream<SessionState> {
@@ -204,7 +235,7 @@ public actor DictationSession {
         stateContinuations[id] = nil
     }
 
-    private func emit(_ state: SessionState) {
+    func emit(_ state: SessionState) {
         for continuation in stateContinuations.values {
             continuation.yield(state)
         }
@@ -212,27 +243,52 @@ public actor DictationSession {
 
     private func handle(_ event: HotkeyEvent) async {
         switch event {
-        case .pressed: // Pause means "mic off until the next press" (ui-spec §2), so a press unpauses
-            var settings = await settingsStore.load()
-            if settings.paused {
-                settings.paused = false
-                await settingsStore.save(settings)
-            }
-            await handlePressed(settings)
+        case .pressed: // the dictation key always dictates
+            let inputs = await commandInputsProvider()
+            decideConfirm(.cancelled) // a dictation press answers a pending confirm with "no"
+            await handlePressed(await unpausedSettings(), kind: .dictation, inputs: inputs)
         case .released: // not gated: pausing mid-hold must still end the recording
-            await handleReleased()
+            if recordingKind == .dictation { await handleReleased() }
+        case .commandPressed:
+            let inputs = await commandInputsProvider()
+            guard commandExecutor != nil, inputs.commandsEnabled, inputs.commandKeyEnabled else { return }
+            if pendingConfirm != nil { // key-down can't tell a tap from a hold, so it confirms
+                if decideConfirm(.confirmed) { ignoreCommandRelease = true }
+                return
+            }
+            await handlePressed(await unpausedSettings(), kind: .command, inputs: inputs)
+        case .commandReleased:
+            if ignoreCommandRelease {
+                ignoreCommandRelease = false
+                return
+            }
+            if recordingKind == .command { await handleReleased() }
         }
     }
 
-    private func handlePressed(_ settings: Settings) async {
+    /// Pause means "mic off until the next press" (ui-spec §2), so a press unpauses.
+    private func unpausedSettings() async -> Settings {
+        var settings = await settingsStore.load()
+        if settings.paused {
+            settings.paused = false
+            await settingsStore.save(settings)
+        }
+        return settings
+    }
+
+    private func handlePressed(_ settings: Settings, kind: TriggerKind, inputs: CommandInputs) async {
+        if kind == .command { ignoreCommandRelease = false } // a confirm tap whose key-up was lost must not eat this press's release
         guard !isRecording else { return } // DS-09: never double-start the one warm engine
         isRecording = true
+        recordingKind = kind
+        recordingInputs = inputs
         recordingSettings = settings // WR-04: a mid-utterance toggle applies from the next press
         recordingGeneration += 1
         pressedAt = (now(), wallClock())
         // Not awaited here: the read runs while he speaks, so it adds nothing to press → recording.
         // Always read: it classifies the injection target, not just the History row.
-        pressApp = Task { [contextProvider] in await contextProvider.pressTimeApp() }
+        // A command press never types, so it has no target to classify.
+        pressApp = kind == .command ? nil : Task { [contextProvider] in await contextProvider.pressTimeApp() }
         let engine = transcriber.engineForUtterance()
         utteranceEngine = engine
         idleSleepTask?.cancel()
@@ -244,10 +300,12 @@ public actor DictationSession {
                 audioAsleep = false
             }
             try await audio.start()
-            recordingDisplays = await displayGate() // before .recording, which the UI lays out by
+            // A command press shows nothing live: no gate, no partials, no raw snapshot.
+            recordingDisplays = kind == .command ? false : await displayGate() // before .recording, which the UI lays out by
+            if kind == .command { emitCommand(.listening) }
             emit(.recording)
             if livePartials, recordingDisplays { startPartials(engine, generation: recordingGeneration) }
-            scheduleMaxDurationCap(generation: recordingGeneration)
+            if kind == .command { scheduleCommandCap(generation: recordingGeneration) } else { scheduleMaxDurationCap(generation: recordingGeneration) }
         } catch {
             isRecording = false
             utteranceEngine = nil
@@ -298,7 +356,7 @@ public actor DictationSession {
         }
     }
 
-    private func forceStopIfStillRecording(generation: Int) async {
+    func forceStopIfStillRecording(generation: Int) async {
         guard isRecording, generation == recordingGeneration else { return } // DS-12
         await handleReleased()
     }
@@ -307,6 +365,11 @@ public actor DictationSession {
         cancelPartials() // first: before audio.stop() and the final pass (60 s cap path too)
         guard isRecording else { return }
         isRecording = false
+        let kind = recordingKind
+        let inputs = recordingInputs
+        commandCapTask?.cancel()
+        commandCapTask = nil
+        if kind == .command { emitCommand(.working) }
         let engine = utteranceEngine ?? transcriber
         utteranceEngine = nil
         let settings = recordingSettings
@@ -328,7 +391,7 @@ public actor DictationSession {
             return
         }
         Task {
-            await self.processUtterance(buffer, engine: engine, settings: settings, displays: displays, clock: clock, pressApp: pressApp)
+            await self.processUtterance(buffer, engine: engine, settings: settings, displays: displays, clock: clock, pressApp: pressApp, kind: kind, inputs: inputs)
             self.utteranceFinished()
         }
     }
@@ -367,7 +430,7 @@ public actor DictationSession {
         if sleeping == task { sleeping = nil }
     }
 
-    private func processUtterance(_ buffer: AudioBuffer, engine: any Transcribing, settings: Settings, displays: Bool, clock: UtteranceClock, pressApp: Task<String?, Never>?) async {
+    private func processUtterance(_ buffer: AudioBuffer, engine: any Transcribing, settings: Settings, displays: Bool, clock: UtteranceClock, pressApp: Task<String?, Never>?, kind: TriggerKind, inputs: CommandInputs) async {
         // No speech: say so plainly when the input itself delivered nothing (display only).
         let noSpeech: ErrorReason = buffer.silentInput.map { .silentInput(device: $0.device) } ?? .sttFailed
         guard !buffer.isEmpty else { // DS-03: silence/noise-only
@@ -396,6 +459,10 @@ public actor DictationSession {
             emit(.idle)
             return
         }
+        if kind == .command {
+            await runCommandKeyUtterance(normalized, inputs: inputs)
+            return
+        }
         // A newer utterance already recording owns the bubble (DS-02).
         if displays, !isRecording { for continuation in rawContinuations.values { continuation.yield(normalized) } }
 
@@ -405,9 +472,11 @@ public actor DictationSession {
         let probed: String?? = if let pressApp { await Deadline.value(of: pressApp, within: pressProbeDeadline, sleep: sleep) } else { .some(nil) }
         if probed == nil { log.info("press app: probe missed the \(String(describing: self.pressProbeDeadline), privacy: .public) deadline, unknown") }
         let pressAppID = probed ?? nil
-        await injectionLock.runExclusive {
-            await self.deliverUtterance(rawTranscript: normalized, settings: settings, clock: clock, pressApp: pressAppID)
+        let route = await injectionLock.runExclusive {
+            await self.deliverUtterance(rawTranscript: normalized, settings: settings, clock: clock, pressApp: pressAppID, inputs: inputs)
         }
+        // After the lock: a confirm can wait seconds for a tap, and dictations must not queue behind it.
+        if let route { await runPrefixCommand(route, inputs: inputs) }
     }
 
     private func collectTranscript(_ buffer: AudioBuffer, engine: any Transcribing) async throws -> String {
@@ -418,15 +487,17 @@ public actor DictationSession {
         return text
     }
 
-    private func deliverUtterance(rawTranscript: String, settings: Settings, clock: UtteranceClock, pressApp: String?) async {
+    /// Returns a command to run once the injection lock is released, when the prefix recognised one.
+    private func deliverUtterance(rawTranscript: String, settings: Settings, clock: UtteranceClock, pressApp: String?, inputs: CommandInputs) async -> CommandRoute? {
         let command = voiceCommands ? CommandParser.parse(rawTranscript) : nil
         let words = CommandParser.wordCount(rawTranscript)
         if let command { // word count only: transcripts never reach the log
             log.info("command: matched \(String(describing: command), privacy: .public) (words=\(words, privacy: .public))")
             await handleCommand(command, pressApp: pressApp)
             emit(.idle)
-            return
+            return nil
         }
+        if let route = await routeDictationPrefix(rawTranscript, inputs: inputs) { return route }
         log.info("command: none (words=\(words, privacy: .public))")
 
         // G1: the AX subrole probe can cost up to 250ms, so only pay it when a record could follow.
@@ -460,6 +531,7 @@ public actor DictationSession {
         if wantsRecord {
             await recordIfAllowed(delivery, rawTranscript: rawTranscript, context: release, pressApp: pressApp, settings: settings, clock: clock, end: end)
         }
+        return nil
     }
 
     /// SPEC §15: after landing, never before. Settings are the press-time snapshot, so nothing
