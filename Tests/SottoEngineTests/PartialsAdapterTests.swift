@@ -83,6 +83,18 @@ final class CaptureChunkCursorTests: XCTestCase {
         XCTAssertTrue(got.filter { $0.rate == 16_000 }.flatMap(\.samples) == ramp(9_000..<9_050), "new segment not from its mark")
     }
 
+    /// A consumer that went away mid-hold resets the pump, so a restart banks nothing into the backlog.
+    func test_inactivePump_restartDoesNotBankBacklog() {
+        var ring = AVAudioEngineCapture.Ring()
+        ring.reset(rate: 48_000)
+        ring.append(ramp(0..<1_000))
+        ring.mark = 0
+        ring.resetChunks(active: true)
+        ring.resetChunks(active: false)  // what the stream's onTermination does
+        XCTAssertTrue(ring.bankForRestart())
+        XCTAssertTrue(ring.chunkBacklog.isEmpty)
+    }
+
     func test_inactiveReturnsNil() {
         var ring = AVAudioEngineCapture.Ring()
         ring.reset(rate: 16_000)

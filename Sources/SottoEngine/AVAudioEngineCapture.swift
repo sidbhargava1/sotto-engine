@@ -24,7 +24,9 @@ public final class AVAudioEngineCapture: AudioCapturing, @unchecked Sendable {
 
     /// `preferredInputUID`: the mic to open (nil follows the macOS default); change it later
     /// with `selectInput(uid:)`.
-    /// `ringSeconds`: the longest hold kept whole; must cover the session's longest cap.
+    /// `ringSeconds`: the longest hold kept whole. Must be at least `DictationSession.longestHold`
+    /// (`maxRecordingDuration + maxDivertedDuration`); a shorter ring silently drops the oldest
+    /// audio of a long diverted hold.
     public init(log: LogSubsystem, preferredInputUID: String? = nil, ringSeconds: Double = AVAudioEngineCapture.defaultRingSeconds) {
         self.ringSeconds = max(1, ringSeconds)
         state = Mutex(Ring(seconds: self.ringSeconds))
@@ -556,7 +558,15 @@ public final class AVAudioEngineCapture: AudioCapturing, @unchecked Sendable {
         }
         continuation.onTermination = { [weak self] _ in
             task.cancel()
-            self?.chunkSink.withLock { if $0.id == id { $0.continuation = nil } }
+            // Only the current stream: a replaced one must not deactivate its successor. Without the
+            // reset a consumer that went away mid-hold (partials cancelled at a divert) leaves the
+            // pump "active" and a restart banks the whole hold into chunkBacklog. Lock order is
+            // chunkSink then state; nothing nests the other way.
+            self?.chunkSink.withLock { sink in
+                guard sink.id == id else { return }
+                sink.continuation = nil
+                self?.state.withLock { $0.resetChunks(active: false) }
+            }
         }
         return stream
     }

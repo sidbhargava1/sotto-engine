@@ -549,6 +549,12 @@ final class RecordingSink: UtteranceSink, @unchecked Sendable {
     private var _held: [Duration] = []
     var received: [String] { lock.withLock { _received } }
     var held: [Duration] { lock.withLock { _held } }
+    private var _failures: [ErrorReason] = []
+    var failures: [ErrorReason] { lock.withLock { _failures } }
+
+    func failed(_ reason: ErrorReason, clock: UtteranceClock) async {
+        lock.withLock { _failures.append(reason) }
+    }
 
     func receive(_ rawTranscript: String, clock: UtteranceClock) async {
         lock.withLock {

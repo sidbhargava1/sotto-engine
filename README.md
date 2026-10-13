@@ -189,6 +189,8 @@ A host can turn a dictation press into a "diverted" utterance mid-hold, for exam
 ```swift
 struct MySink: UtteranceSink {
     func receive(_ rawTranscript: String, clock: UtteranceClock) async { /* yours */ }
+    // Optional, default is a no-op: a diverted utterance that ended without a transcript.
+    func failed(_ reason: ErrorReason, clock: UtteranceClock) async { /* yours */ }
 }
 
 let session = DictationSession(/* ... */, divertSink: MySink(), maxDivertedDuration: .seconds(180))
@@ -198,10 +200,13 @@ edges.yield(.divert)
 
 - `.divert` is ignored without a sink, when nothing is recording, during a command press, and once already diverted, so key autorepeat is harmless.
 - Displayed partials end (the partial stream emits `nil`) and the recording cap becomes `maxDivertedDuration`, measured from the divert.
-- States emitted: `.recording` (at the press, as usual), then on release `.transcribing`, then `.idle` once the transcript is non-empty and handed over. Nothing is emitted while the sink works. Empty speech, STT failure and a missing model emit their usual `.error(...)` then `.idle`, and the sink is not called. No raw-transcript snapshot is published.
+- States emitted: `.recording` (at the press, as usual), then on release `.transcribing`, then `.idle` once the transcript is non-empty and handed over. Nothing is emitted while the sink works. Empty speech, STT failure and a missing model emit their usual `.error(...)` then `.idle`, and `receive` is not called; `failed(_:clock:)` is, with the same reason. No raw-transcript snapshot is published.
 - `UtteranceClock` exposes `startedAt` and `heldDuration`.
-- `AVAudioEngineCapture(log:ringSeconds:)` sets how much audio the capture ring keeps (default 90 s, about 0.19 MB per second at 48 kHz Float32, so 180 s is about 35 MB). Set it at least as long as the longest cap in use.
-- Versioning: `HotkeyEvent.divert` breaks exhaustive `switch`es over it.
+- `AVAudioEngineCapture(log:ringSeconds:)` sets how much audio the capture ring keeps (default 90 s, about 0.19 MB per second at 48 kHz Float32, so 180 s is about 35 MB). `ringSeconds` must be at least `maxRecordingDuration + maxDivertedDuration` (`session.longestHold`), because the diverted cap runs from the divert, not the press: a press diverted just before its dictation cap can hold for both. A shorter ring silently drops the oldest audio of a long diverted hold. The session cannot see the capture's ring, so it does not check this for you.
+- `.idle` for a diverted utterance is emitted only when nothing is recording and no other utterance is in flight, so an earlier dictation still injecting keeps the state.
+- Sink calls may overlap and are not ordered; a slow call delays idle sleep and `drain`.
+- A diverted transcript is never parsed as a command: "scratch that" or a command prefix phrase reaches the sink verbatim.
+- Versioning: `HotkeyEvent.divert` is a new case and breaks exhaustive `switch`es over it.
 
 ## Copy-ahead decoding
 

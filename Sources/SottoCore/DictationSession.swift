@@ -155,6 +155,11 @@ public actor DictationSession {
         self.maxDivertedDuration = maxDivertedDuration
     }
 
+    /// The longest a single hold can last: a dictation press diverted just before its cap runs for
+    /// `maxRecordingDuration` plus `maxDivertedDuration` (the diverted cap counts from the divert).
+    /// Size the capture ring to at least this, or the oldest audio of a long diverted hold is dropped.
+    public nonisolated var longestHold: Duration { maxRecordingDuration + maxDivertedDuration }
+
     public func start() {
         guard runTask == nil else { return }
         runTask = Task {
@@ -406,6 +411,7 @@ public actor DictationSession {
         } catch {
             emit(.error(.micLost))
             emit(.idle)
+            if kind == .diverted { await divertFailed(.micLost, clock: clock) }
             utteranceFinished()
             return
         }
@@ -449,12 +455,27 @@ public actor DictationSession {
         if sleeping == task { sleeping = nil }
     }
 
+    private func divertFailed(_ reason: ErrorReason, clock: UtteranceClock) async {
+        let label: String
+        switch reason {
+        case .micDenied: label = "micDenied"
+        case .micLost: label = "micLost"
+        case .sttFailed: label = "sttFailed"
+        case .modelMissing: label = "modelMissing"
+        case .silentInput: label = "silentInput"
+        case .undoRefused: label = "undoRefused"
+        }
+        log.info("divert: failed (reason=\(label, privacy: .public))")
+        await divertSink?.failed(reason, clock: clock)
+    }
+
     private func processUtterance(_ buffer: AudioBuffer, engine: any Transcribing, settings: Settings, displays: Bool, clock: UtteranceClock, pressApp: Task<String?, Never>?, kind: TriggerKind, inputs: CommandInputs) async {
         // No speech: say so plainly when the input itself delivered nothing (display only).
         let noSpeech: ErrorReason = buffer.silentInput.map { .silentInput(device: $0.device) } ?? .sttFailed
         guard !buffer.isEmpty else { // DS-03: silence/noise-only
             emit(.error(noSpeech))
             emit(.idle)
+            if kind == .diverted { await divertFailed(noSpeech, clock: clock) }
             return
         }
 
@@ -464,10 +485,12 @@ public actor DictationSession {
         } catch is ModelNotDownloaded {
             emit(.error(.modelMissing)) // still nothing typed; the host fetches (ADR §5)
             emit(.idle)
+            if kind == .diverted { await divertFailed(.modelMissing, clock: clock) }
             return
         } catch {
             emit(.error(noSpeech)) // DS-04, FT-05: STT failure never injects anything
             emit(.idle)
+            if kind == .diverted { await divertFailed(noSpeech, clock: clock) }
             return
         }
 
@@ -476,6 +499,7 @@ public actor DictationSession {
         guard !normalized.isEmpty else {
             emit(.error(noSpeech))
             emit(.idle)
+            if kind == .diverted { await divertFailed(noSpeech, clock: clock) }
             return
         }
         if kind == .command {
@@ -483,7 +507,10 @@ public actor DictationSession {
             return
         }
         if kind == .diverted, let divertSink { // the host owns everything from here
-            if !isRecording { emit(.idle) }
+            // Only the last one out says idle: an earlier dictation still injecting owns the state.
+            if !isRecording, activeUtterances == 1 { emit(.idle) }
+            let words = normalized.split(whereSeparator: \.isWhitespace).count
+            log.info("divert: handed to sink (words=\(words, privacy: .public))") // count only, never text
             await divertSink.receive(normalized, clock: clock)
             return
         }

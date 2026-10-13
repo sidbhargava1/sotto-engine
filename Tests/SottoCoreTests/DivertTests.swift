@@ -173,6 +173,7 @@ final class DivertTests: SessionTestCase {
         XCTAssertTrue(sink.received.isEmpty)
         let settled = await states.settled()
         XCTAssertEqual(settled, [.recording, .transcribing, .error(.sttFailed), .idle])
+        XCTAssertEqual(sink.failures, [.sttFailed])
     }
 
     func test_emptyTranscriptOnDivertedUtterance_isNoSpeechAndSkipsSink() async {
@@ -187,6 +188,106 @@ final class DivertTests: SessionTestCase {
         XCTAssertTrue(sink.received.isEmpty)
         let settled = await states.settled()
         XCTAssertEqual(settled, [.recording, .transcribing, .error(.sttFailed), .idle])
+        XCTAssertEqual(sink.failures, [.sttFailed])
+    }
+
+    func test_modelMissingOnDivertedUtterance_callsFailed() async {
+        let sink = RecordingSink()
+        let h = makeHarness(transcriber: FixtureTranscriber([.fail(ModelNotDownloaded(ModelID("parakeet")))]), divertSink: sink)
+        await h.session.start()
+        await h.hotkey.press()
+        await h.hotkey.divert()
+        await h.hotkey.release()
+        await settle(h)
+        XCTAssertTrue(sink.received.isEmpty)
+        XCTAssertEqual(sink.failures, [.modelMissing])
+    }
+
+    func test_successfulDivert_doesNotCallFailed() async {
+        let sink = RecordingSink()
+        let h = makeHarness(divertSink: sink)
+        await h.session.start()
+        await h.hotkey.press()
+        await h.hotkey.divert()
+        await h.hotkey.release()
+        await settle(h)
+        XCTAssertTrue(sink.failures.isEmpty)
+    }
+
+    func test_sinkWithoutFailedOverride_compilesWithDefault() async {
+        struct Minimal: UtteranceSink { func receive(_ rawTranscript: String, clock: UtteranceClock) async {} }
+        await Minimal().failed(.sttFailed, clock: UtteranceClock(pressedAt: .now, startedAt: Date(), releasedAt: .now))
+    }
+
+    func test_longestHold_isSumOfCaps() async {
+        let h = makeHarness(maxRecordingDuration: .seconds(60), divertSink: RecordingSink(), maxDivertedDuration: .seconds(180))
+        XCTAssertEqual(h.session.longestHold, .seconds(240))
+    }
+
+    /// The diverted cap runs from the divert, so a late divert makes the hold longer than either cap.
+    /// The whole hold must stay within `longestHold` (what a host sizes the capture ring to).
+    func test_lateDivert_stopsAtDivertedCapFromDivert_andHoldFitsLongestHold() async {
+        let sink = RecordingSink()
+        let h = makeHarness(maxRecordingDuration: .milliseconds(300), now: { .now }, divertSink: sink, maxDivertedDuration: .milliseconds(150))
+        await h.session.start()
+        await h.hotkey.press()
+        try? await Task.sleep(for: .milliseconds(200)) // late in the hold, before the dictation cap
+        await h.hotkey.divert()
+        await waitUntil("the diverted cap's stop") { await h.audio.calls.contains("stop") }
+        await settle(h)
+        XCTAssertEqual(sink.received, ["hello world"])
+        let held = try? XCTUnwrap(sink.held.first)
+        XCTAssertGreaterThan(held ?? .zero, .milliseconds(300), "cap counted from the divert, not the press")
+        XCTAssertLessThanOrEqual(held ?? .seconds(99), h.session.longestHold)
+    }
+
+    func test_divertedTranscriptShapedLikeCommand_reachesSinkVerbatim() async {
+        for phrase in ["scratch that", "Sotto open Slack"] {
+            let sink = RecordingSink()
+            let h = makeHarness(transcriber: FixtureTranscriber([.text(phrase)]), commandInputs: CommandInputs(commandsEnabled: true, commandKeyEnabled: true, prefixEnabled: true), divertSink: sink)
+            await h.session.start()
+            await h.hotkey.press()
+            await h.hotkey.divert()
+            await h.hotkey.release()
+            await settle(h)
+            XCTAssertEqual(sink.received, [phrase])
+            let undone = await h.undo.callCount()
+            let ran = await h.executor.callCount()
+            XCTAssertEqual(undone, 0, phrase)
+            XCTAssertEqual(ran, 0, phrase)
+        }
+    }
+
+    func test_divertedA_releasedThenBPressed_emitsNoIdleForA() async {
+        let sink = RecordingSink()
+        let h = makeHarness(transcriber: FixtureTranscriber([.text("alpha"), .text("beta")], warmup: .milliseconds(250)), divertSink: sink)
+        let states = await collectStates(h)
+        await h.session.start()
+        await h.hotkey.press()
+        await h.hotkey.divert()
+        await h.hotkey.release()
+        await h.hotkey.press() // B, while A's STT is still running
+        await waitUntil("A reaches the sink") { sink.received == ["alpha"] }
+        XCTAssertFalse(states.snapshot().contains(.idle), "A must not stomp B's recording: \(states.snapshot())")
+        await h.hotkey.release()
+        await settle(h)
+    }
+
+    func test_divertedUtterance_doesNotStompEarlierDictationStillInFlight() async {
+        let sink = RecordingSink()
+        // A (dictation) is slow in STT; B (diverted) overtakes it.
+        let h = makeHarness(transcriber: FixtureTranscriber([.text("first"), .text("second")], warmup: .milliseconds(300)), divertSink: sink)
+        let states = await collectStates(h)
+        await h.session.start()
+        await h.hotkey.press()
+        await h.hotkey.release()
+        await h.hotkey.press()
+        await h.hotkey.divert()
+        await h.hotkey.release()
+        await waitUntil("B reaches the sink") { !sink.received.isEmpty }
+        XCTAssertFalse(states.snapshot().contains(.idle), "A is still in flight: \(states.snapshot())")
+        await settle(h)
+        XCTAssertEqual(states.snapshot().last, .idle)
     }
 
     func test_divertedRecordingCountsAsRecordingForIdleSleep() async {
