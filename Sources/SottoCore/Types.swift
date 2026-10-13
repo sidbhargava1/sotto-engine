@@ -136,6 +136,10 @@ public enum HotkeyEvent: Sendable, Equatable {
     /// The command key: command mode from key-down, and the confirm tap for a pending Shortcut.
     case commandPressed
     case commandReleased
+    /// Mid-hold, turns the current dictation press into a diverted utterance: recording continues,
+    /// the cap becomes `maxDivertedDuration`, and on release the raw transcript goes to the
+    /// `UtteranceSink` only. Ignored without a sink, when not recording a dictation, or once diverted.
+    case divert
 }
 
 /// Drives the floating indicator (docs/ui-spec.md §1.4). `DictationSession` is the only writer.

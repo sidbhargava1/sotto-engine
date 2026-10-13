@@ -39,6 +39,29 @@ final class StreamingResamplerTests: XCTestCase {
 final class CaptureChunkCursorTests: XCTestCase {
     private func ramp(_ range: Range<Int>) -> [Float] { range.map(Float.init) }
 
+    func test_ringLengthIsHonoured_byResetAndSince() {
+        var ring = AVAudioEngineCapture.Ring(seconds: 2)
+        ring.reset(rate: 100)
+        XCTAssertEqual(ring.buffer.count, 200)
+        ring.append(ramp(0..<500))
+        XCTAssertEqual(ring.since(0), ramp(300..<500), "keeps only the newest `seconds`")
+        XCTAssertEqual(AVAudioEngineCapture.Ring().seconds, 90, "default is unchanged")
+    }
+
+    func test_ringOverflowSignal_firesOnlyWhenOldestAudioIsLost() {
+        var ring = AVAudioEngineCapture.Ring(seconds: 2)
+        ring.reset(rate: 100)
+        ring.append(ramp(0..<150))
+        _ = ring.since(0)
+        _ = ring.since(50)  // exactly fills the ring
+        XCTAssertEqual(ring.overflowCount, 0)
+        XCTAssertEqual(ring.droppedSamples, 0)
+        ring.append(ramp(150..<500))
+        _ = ring.since(0)
+        XCTAssertEqual(ring.overflowCount, 1)
+        XCTAssertEqual(ring.droppedSamples, 300)
+    }
+
     func test_deltasFromTheMark_noOverlap() throws {
         var ring = AVAudioEngineCapture.Ring()
         ring.reset(rate: 16_000)
@@ -72,6 +95,18 @@ final class CaptureChunkCursorTests: XCTestCase {
         got += try XCTUnwrap(ring.takeChunkDeltas())
         XCTAssertTrue(got.filter { $0.rate == 48_000 }.flatMap(\.samples) == ramp(200..<1_300), "old segment dropped or duplicated")
         XCTAssertTrue(got.filter { $0.rate == 16_000 }.flatMap(\.samples) == ramp(9_000..<9_050), "new segment not from its mark")
+    }
+
+    /// A consumer that went away mid-hold resets the pump, so a restart banks nothing into the backlog.
+    func test_inactivePump_restartDoesNotBankBacklog() {
+        var ring = AVAudioEngineCapture.Ring()
+        ring.reset(rate: 48_000)
+        ring.append(ramp(0..<1_000))
+        ring.mark = 0
+        ring.resetChunks(active: true)
+        ring.resetChunks(active: false)  // what the stream's onTermination does
+        XCTAssertTrue(ring.bankForRestart())
+        XCTAssertTrue(ring.chunkBacklog.isEmpty)
     }
 
     func test_inactiveReturnsNil() {

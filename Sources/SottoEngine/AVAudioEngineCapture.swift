@@ -1,5 +1,5 @@
 // Engine starts at launch and stays warm for a grace period after each dictation, then sleeps
-// until the next press (SPEC §5 step 2). The tap writes native-rate mono into a 90s ring; a warm
+// until the next press (SPEC §5 step 2). The tap writes native-rate mono into a ring (90s default); a warm
 // start() only marks an offset with 150ms pre-roll. A press on a sleeping engine pays the cold
 // start, waits for the tap to carry real audio (AudioWake), and has no pre-roll. Bluetooth inputs
 // never sleep (AudioIdleSleep): their wake is an HFP route switch.
@@ -12,16 +12,24 @@ import os
 public final class AVAudioEngineCapture: AudioCapturing, @unchecked Sendable {
     public enum Failure: Error { case micDenied, notRecording, deviceSwitch(OSStatus) }
 
-    private static let ringSeconds: Double = 90
+    /// Default ring length. ~0.19 MB per second at 48 kHz Float32 (about 17 MB at 90 s); a longer
+    /// ring is what lets a single hold exceed 90 s without dropping its start.
+    public static let defaultRingSeconds: Double = 90
+    private let ringSeconds: Double
     private let log: Logger
     // @unchecked: `engine` is only touched from prewarm/configuration-change on the main actor;
     // all tap/start/stop state lives behind `state`.
     private let engine = AVAudioEngine()
-    private let state = Mutex(Ring())
+    private let state: Mutex<Ring>
 
     /// `preferredInputUID`: the mic to open (nil follows the macOS default); change it later
     /// with `selectInput(uid:)`.
-    public init(log: LogSubsystem, preferredInputUID: String? = nil) {
+    /// `ringSeconds`: the longest hold kept whole. Must be at least `DictationSession.longestHold`
+    /// (`maxRecordingDuration + maxDivertedDuration`); a shorter ring silently drops the oldest
+    /// audio of a long diverted hold.
+    public init(log: LogSubsystem, preferredInputUID: String? = nil, ringSeconds: Double = AVAudioEngineCapture.defaultRingSeconds) {
+        self.ringSeconds = max(1, ringSeconds)
+        state = Mutex(Ring(seconds: self.ringSeconds))
         self.log = log.logger("audio")
         selection = InputSelection(preferred: preferredInputUID)
     }
@@ -59,6 +67,7 @@ public final class AVAudioEngineCapture: AudioCapturing, @unchecked Sendable {
     }
 
     struct Ring {  // internal for SottoTests (chunk cursor across restarts)
+        var seconds = AVAudioEngineCapture.defaultRingSeconds
         var buffer: [Float] = []
         var rate: Double = 0
         var written = 0  // monotonic sample count; index = written % buffer.count
@@ -111,7 +120,7 @@ public final class AVAudioEngineCapture: AudioCapturing, @unchecked Sendable {
 
         mutating func reset(rate: Double) {
             self.rate = rate
-            buffer = [Float](repeating: 0, count: Int(rate * AVAudioEngineCapture.ringSeconds))
+            buffer = [Float](repeating: 0, count: Int(rate * seconds))
             written = 0
             floor = 0
         }
@@ -124,8 +133,17 @@ public final class AVAudioEngineCapture: AudioCapturing, @unchecked Sendable {
             }
         }
 
-        func since(_ mark: Int) -> [Float] {
-            let count = min(written - mark, buffer.count)  // stuck hotkey: keep the newest 90s
+        /// Reads that wanted more than the ring holds (oldest audio lost), and the samples lost.
+        /// Tests and `stop()` read these; they are never reset by the ring itself.
+        var overflowCount = 0
+        var droppedSamples = 0
+
+        mutating func since(_ mark: Int) -> [Float] {
+            if written - mark > buffer.count {
+                overflowCount += 1
+                droppedSamples += written - mark - buffer.count
+            }
+            let count = min(written - mark, buffer.count)  // too-long hold or stuck hotkey: keep the newest `seconds`
             guard count > 0 else { return [] }
             let start = written - count
             return (start..<written).map { buffer[$0 % buffer.count] }
@@ -549,7 +567,15 @@ public final class AVAudioEngineCapture: AudioCapturing, @unchecked Sendable {
         }
         continuation.onTermination = { [weak self] _ in
             task.cancel()
-            self?.chunkSink.withLock { if $0.id == id { $0.continuation = nil } }
+            // Only the current stream: a replaced one must not deactivate its successor. Without the
+            // reset a consumer that went away mid-hold (partials cancelled at a divert) leaves the
+            // pump "active" and a restart banks the whole hold into chunkBacklog. Lock order is
+            // chunkSink then state; nothing nests the other way.
+            self?.chunkSink.withLock { sink in
+                guard sink.id == id else { return }
+                sink.continuation = nil
+                self?.state.withLock { $0.resetChunks(active: false) }
+            }
         }
         return stream
     }
@@ -570,7 +596,11 @@ public final class AVAudioEngineCapture: AudioCapturing, @unchecked Sendable {
             self?.state.withLock { ring in ring.mark.map { ring.written > $0 } ?? true || !ring.carried.isEmpty } ?? true
         }
         if !got { log.notice("stop: no buffer since the mark after \(Int((AudioWake.stopGrace / .milliseconds(1)).rounded()), privacy: .public)ms") }
+        var dropped = 0
+        var ringRate = 0.0
         let (samples, rate, carried) = try state.withLock { ring -> ([Float], Double, [Float]) in
+            let before = ring.droppedSamples
+            defer { dropped = ring.droppedSamples - before; ringRate = ring.rate }
             // mark is nil only if a restart failed mid-record; return what was banked.
             guard let mark = ring.mark else {
                 if ring.carried.isEmpty { throw Failure.notRecording }
@@ -582,6 +612,10 @@ public final class AVAudioEngineCapture: AudioCapturing, @unchecked Sendable {
                 ring.carried = []
             }
             return (ring.since(mark), ring.rate, ring.carried)
+        }
+        if dropped > 0 {
+            // Counts only, no audio or text. The ring is shorter than the hold: raise `ringSeconds`.
+            log.error("capture ring overflow: dropped \(dropped, privacy: .public) samples (\(Double(dropped) / max(ringRate, 1), privacy: .public) s) of the oldest audio; ring is \(self.ringSeconds, privacy: .public) s")
         }
         // Display only: the session says "No audio from …" if nothing transcribes.
         var silent: SottoCore.AudioBuffer.SilentInput?

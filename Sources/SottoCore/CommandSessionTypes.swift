@@ -7,6 +7,8 @@ import Foundation
 enum TriggerKind: Sendable, Equatable {
     case dictation
     case command
+    /// A dictation press the host turned into a diverted utterance mid-hold (`HotkeyEvent.divert`).
+    case diverted
 }
 
 /// Command progress for the host's indicator, separate from `SessionState` (which still carries the

@@ -58,7 +58,9 @@ class SessionTestCase: XCTestCase {
         commandCatalog initialCatalog: CommandCatalog = CommandCatalog(),
         executor: FakeCommandExecutor = FakeCommandExecutor(),
         maxCommandRecordingDuration: Duration = .seconds(15),
-        commandSleep: Deadline.Sleeper? = nil
+        commandSleep: Deadline.Sleeper? = nil,
+        divertSink: (any UtteranceSink)? = nil,
+        maxDivertedDuration: Duration = .seconds(180)
     ) -> Harness {
         let commandInputs = CommandBox(initialInputs)
         let catalog = CommandBox(initialCatalog)
@@ -96,7 +98,9 @@ class SessionTestCase: XCTestCase {
             commandCatalog: { catalog.value },
             commandExecutor: executor,
             commandSleep: commandSleep ?? { await clock.sleep($0) },
-            maxCommandRecordingDuration: maxCommandRecordingDuration
+            maxCommandRecordingDuration: maxCommandRecordingDuration,
+            divertSink: divertSink,
+            maxDivertedDuration: maxDivertedDuration
         )
         return Harness(session: session, hotkey: hotkey, audio: audio, transcriber: transcriber, ax: ax, paste: paste, unicode: unicode, context: context, settings: settings, clipboard: clipboard, undo: undo, clock: clock, executor: executor, commandInputs: commandInputs, catalog: catalog)
     }

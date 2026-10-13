@@ -182,6 +182,38 @@ for await phase in await session.commandPhaseUpdates() { ... }                  
 - Versioning: the new `HotkeyEvent` cases break exhaustive `switch`es over it, so this ships as 0.5.0.
 - A command press during a dictation that is still being cleaned up does not cancel it: the dictation lands first, then the command runs.
 
+## Diverting an utterance
+
+A host can turn a dictation press into a "diverted" utterance mid-hold, for example when the user adds a modifier key while talking. Recording carries on uninterrupted; on release the raw transcript goes to your sink instead of command matching, cleanup, injection, the clipboard and history.
+
+```swift
+struct MySink: UtteranceSink {
+    func receive(_ rawTranscript: String, clock: UtteranceClock) async { /* yours */ }
+    // Optional, default is a no-op: a diverted utterance that ended without a transcript.
+    func failed(_ reason: ErrorReason, clock: UtteranceClock) async { /* yours */ }
+}
+
+// The capture is built first, so derive its ring from the same constants the session gets.
+// Whole seconds rounded up, plus 1 s headroom for the tap's buffer granularity.
+let maxRecording = Duration.seconds(60), maxDiverted = Duration.seconds(180)
+let ringSeconds = Double((maxRecording + maxDiverted).components.seconds) + 1
+let capture = AVAudioEngineCapture(log: log, ringSeconds: ringSeconds)
+let session = DictationSession(/* capture, ... */, divertSink: MySink(),
+                               maxRecordingDuration: maxRecording, maxDivertedDuration: maxDiverted)
+// Later, while a dictation press is down, yield it on the same stream as the other edges:
+edges.yield(.divert)
+```
+
+- `.divert` is ignored without a sink, when nothing is recording, during a command press, and once already diverted, so key autorepeat is harmless.
+- Displayed partials end (the partial stream emits `nil`) and the recording cap becomes `maxDivertedDuration`, measured from the divert.
+- States emitted: `.recording` (at the press, as usual), then on release `.transcribing`, then `.idle` once the transcript is non-empty and handed over. Nothing is emitted while the sink works. Empty speech, STT failure and a missing model emit their usual `.error(...)` then `.idle`, and `receive` is not called; `failed(_:clock:)` is, with the same reason. No raw-transcript snapshot is published.
+- `UtteranceClock` exposes `startedAt` and `heldDuration`.
+- `AVAudioEngineCapture(log:ringSeconds:)` sets how much audio the capture ring keeps (default 90 s, about 0.19 MB per second at 48 kHz Float32, so 180 s is about 35 MB). `ringSeconds` must be at least `maxRecordingDuration + maxDivertedDuration` (`session.longestHold`), because the diverted cap runs from the divert, not the press: a press diverted just before its dictation cap can hold for both. A shorter ring silently drops the oldest audio of a long diverted hold. The session cannot see the capture's ring, so it does not check this for you.
+- `.idle` for a diverted utterance is emitted only when nothing is recording and no other utterance is in flight, so an earlier dictation still injecting keeps the state.
+- Sink calls may overlap and are not ordered; a slow call delays idle sleep and `drain`.
+- A diverted transcript is never parsed as a command: "scratch that" or a command prefix phrase reaches the sink verbatim.
+- Versioning: `HotkeyEvent.divert` is a new case and breaks exhaustive `switch`es over it.
+
 ## Copy-ahead decoding
 
 Cleanup output is nearly a copy of the transcript, so `LlamaEngine` guesses the next few tokens by copying from the prompt and has the model verify them in one batch with greedy sampling. The text is the same as one-token-at-a-time decoding; verified byte-identical on 103 transcripts on Apple silicon (M-series), though batched verification can differ in the last float bits on other GPUs. It needs llama.cpp b11404 or later (the engine's pinned b11514 qualifies) and a model whose memory can drop part of a sequence: recurrent and hybrid models run without it. Hosts decide with `LlamaBackend.make(..., speculation:)` (default on); `SOTTO_SPECULATION=0` in the environment is a debug override that turns it off.
