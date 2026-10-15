@@ -101,11 +101,15 @@ public struct CleanupRequest: Sendable, Equatable {
     public let rawTranscript: String
     public let dictionary: [String]
     public let targetContext: TargetContext
+    /// Placeholders (`ProtectedText.tokens`) standing in `rawTranscript` for text the model must not
+    /// see. The prompt asks it to carry each through exactly once.
+    public let protectedTokens: [String]
 
-    public init(rawTranscript: String, dictionary: [String], targetContext: TargetContext) {
+    public init(rawTranscript: String, dictionary: [String], targetContext: TargetContext, protectedTokens: [String] = []) {
         self.rawTranscript = rawTranscript
         self.dictionary = dictionary
         self.targetContext = targetContext
+        self.protectedTokens = protectedTokens
     }
 }
 

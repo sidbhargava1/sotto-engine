@@ -214,6 +214,24 @@ edges.yield(.divert)
 - A diverted transcript is never parsed as a command: "scratch that" or a command prefix phrase reaches the sink verbatim.
 - Versioning: `HotkeyEvent.divert` is a new case and breaks exhaustive `switch`es over it.
 
+## Protected phrases
+
+A host can name phrases whose replacement text the cleanup model must never see or edit (a snippet, a resolved file path). Give the session a closure; it is read once per dictation, after command matching.
+
+```swift
+let session = DictationSession(/* capture, ... */, protectedPhrases: {
+    [ProtectedPhrase(spoken: "my calendar link", text: "https://cal.com/me")]
+})
+```
+
+- Phrases are matched on the raw transcript before the dictionary rewrite: whole words, any case, any run of whitespace or STT punctuation between words, longest phrase first. Each hit becomes an opaque placeholder (`⟦1⟧`); the dictionary rewrite and the model see only that.
+- `CleanupRequest.protectedTokens` lists the placeholders, and the prompt tail (never the cached prefix) asks the model to copy each one exactly once. A custom `CleanupBackend` must do the same.
+- The text is swapped in after cleanup and line-end trimming, so it lands byte for byte. Terminal-class targets still get newlines as spaces.
+- If a placeholder is dropped, repeated or invented, or the model fails or stalls, the session types the raw transcript with the text swapped in and reports `.degraded(.rawTyped)`.
+- If nothing but placeholders and hesitation sounds ("um", "uh") was said, cleanup is skipped and the text lands as written.
+- History's raw text keeps what was said; the clean text keeps what landed. The record's `words` and `UtteranceTiming.words` count the words that were spoken, not the inserted text.
+- `ProtectedText` is the pure piece underneath, usable without a session.
+
 ## Copy-ahead decoding
 
 Cleanup output is nearly a copy of the transcript, so `LlamaEngine` guesses the next few tokens by copying from the prompt and has the model verify them in one batch with greedy sampling. The text is the same as one-token-at-a-time decoding; verified byte-identical on 103 transcripts on Apple silicon (M-series), though batched verification can differ in the last float bits on other GPUs. It needs llama.cpp b11404 or later (the engine's pinned b11514 qualifies) and a model whose memory can drop part of a sequence: recurrent and hybrid models run without it. Hosts decide with `LlamaBackend.make(..., speculation:)` (default on); `SOTTO_SPECULATION=0` in the environment is a debug override that turns it off.
