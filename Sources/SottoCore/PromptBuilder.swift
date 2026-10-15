@@ -88,7 +88,10 @@ public enum PromptBuilder {
 
     static func tail(_ request: CleanupRequest) -> String {
         let app = request.targetContext.bundleID.map(neutralise) ?? "unknown"
-        return "App: \(app)\n<transcript>\(neutralise(request.rawTranscript))</transcript>"
+        // After the cache boundary and only when there are placeholders, so the prefix is untouched.
+        let keep = request.protectedTokens.isEmpty ? "" : "\nKeep: \(request.protectedTokens.joined(separator: " ")) stand for text the speaker chose. "
+            + "Copy each into your answer exactly once, exactly as written, where it stands in the sentence. Never explain, reword or drop one."
+        return "App: \(app)\(keep)\n<transcript>\(neutralise(request.rawTranscript))</transcript>"
     }
 
     /// PB-05: user text can't close the transcript tag or smuggle ChatML markers. The backend also

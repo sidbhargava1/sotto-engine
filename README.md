@@ -38,7 +38,7 @@ Logs carry word counts and timings, never text. There is no history store; the s
 ## Install
 
 ```swift
-.package(url: "https://github.com/sidbhargava1/sotto-engine", .upToNextMinor(from: "0.5.0")),
+.package(url: "https://github.com/sidbhargava1/sotto-engine", .upToNextMinor(from: "0.6.0")),
 ```
 
 Then depend on `SottoCore` (pure logic and protocols) and `SottoEngine` (the macOS adapters). llama.cpp ships as a prebuilt `llama.xcframework` attached to each release, which SwiftPM fetches and verifies by checksum; you don't need cmake. To build it from source instead, run `scripts/build-llama.sh` in a checkout: a `Vendor/llama.xcframework` there takes precedence.
@@ -213,6 +213,26 @@ edges.yield(.divert)
 - Sink calls may overlap and are not ordered; a slow call delays idle sleep and `drain`.
 - A diverted transcript is never parsed as a command: "scratch that" or a command prefix phrase reaches the sink verbatim.
 - Versioning: `HotkeyEvent.divert` is a new case and breaks exhaustive `switch`es over it.
+
+## Protected phrases
+
+A host can name phrases whose replacement text the cleanup model must never see or edit (a snippet, a resolved file path). Give the session a closure; it is read once per dictation, after command matching.
+
+```swift
+let session = DictationSession(/* capture, ... */, protectedPhrases: {
+    [ProtectedPhrase(spoken: "my calendar link", text: "https://cal.com/me")]
+})
+```
+
+- Phrases are matched on the raw transcript before the dictionary rewrite: whole words, any case, any run of whitespace or STT punctuation between words, longest phrase first. Each hit becomes an opaque placeholder (`⟦1⟧`); the dictionary rewrite and the model see only that.
+- `CleanupRequest.protectedTokens` lists the placeholders, and the prompt tail (never the cached prefix) asks the model to copy each one exactly once. A custom `CleanupBackend` must do the same.
+- The text is swapped in after cleanup and line-end trimming, so it lands byte for byte. Terminal-class targets still get newlines as spaces.
+- A self-correction across two placeholders ("send ⟦1⟧ no wait ⟦2⟧") normally ends in the raw fallback below, with both texts.
+- If a placeholder is dropped, repeated or invented, or the model fails or stalls, the session types the raw transcript with the text swapped in and reports `.degraded(.rawTyped)`.
+- If nothing but placeholders and hesitation sounds was said (an English list: um, uh, er, ah, hm and their stretched forms), cleanup is skipped and the text lands as written.
+- History's raw text keeps what was said; the clean text keeps what landed. The record's `words` and `UtteranceTiming.words` count the words that were spoken, not the inserted text.
+- `DictationRecord.protectedSpans` is how many placeholders the dictation carried (0 for an ordinary one), so a host can tell a row holds text the speaker did not say.
+- `ProtectedText` is the pure piece underneath, usable without a session.
 
 ## Copy-ahead decoding
 

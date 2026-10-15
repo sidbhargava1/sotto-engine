@@ -39,6 +39,8 @@ public actor DictationSession {
     let maxCommandRecordingDuration: Duration
     private let divertSink: (any UtteranceSink)?
     private let maxDivertedDuration: Duration
+    /// Read at each dictation, after command matching (ProtectedSpans.swift).
+    private let protectedPhrases: @Sendable () async -> [ProtectedPhrase]
     /// Asked once per press, after capture starts: false means nothing is displayed beyond the
     /// capsule (Classic theme, or the mascot suppressed), so no partials and no raw snapshot.
     private let displayGate: @Sendable () async -> Bool
@@ -115,7 +117,8 @@ public actor DictationSession {
         commandSleep: @escaping Deadline.Sleeper = Deadline.realSleep,
         maxCommandRecordingDuration: Duration = .seconds(15),
         divertSink: (any UtteranceSink)? = nil,
-        maxDivertedDuration: Duration = .seconds(180)
+        maxDivertedDuration: Duration = .seconds(180),
+        protectedPhrases: @escaping @Sendable () async -> [ProtectedPhrase] = { [] }
     ) {
         self.hotkey = hotkey
         self.audio = audio
@@ -153,6 +156,7 @@ public actor DictationSession {
         self.maxCommandRecordingDuration = maxCommandRecordingDuration
         self.divertSink = divertSink
         self.maxDivertedDuration = maxDivertedDuration
+        self.protectedPhrases = protectedPhrases
     }
 
     /// The longest a single hold can last: a dictation press diverted just before its cap runs for
@@ -559,28 +563,41 @@ public actor DictationSession {
         let terms = (try? await dictionaryStore.load()) ?? []
         // After command matching (CLAUDE.md), so a heard-as variant can never mask "scratch that".
         // Raw fallbacks use the rewritten text too: RawRemainder aligns against what cleanup saw.
-        let transcript = DictionaryRewriter.rewrite(rawTranscript, terms: terms)
-        if transcript != rawTranscript { log.info("dictionary: heard-as rewrite applied") }
-        let request = CleanupRequest(rawTranscript: transcript, dictionary: terms.map(\.text), targetContext: context)
+        // Protected phrases first, on what was said: a heard-as variant must not eat part of one, and
+        // the dictionary never sees a placeholder. The model sees placeholders only.
+        let matched = ProtectedText(rawTranscript, phrases: await protectedPhrases())
+        let protected = matched?.mappingText { DictionaryRewriter.rewrite($0, terms: terms) }
+        let transcript = protected?.masked ?? DictionaryRewriter.rewrite(rawTranscript, terms: terms)
+        if transcript != (matched?.masked ?? rawTranscript) { log.info("dictionary: heard-as rewrite applied") }
+        if let protected { log.info("protected: \(protected.tokens.count, privacy: .public) spans, cleanup \(protected.isOnlyProtected ? "skipped" : "guarded", privacy: .public)") }
+        // Raw fallbacks and RawRemainder use the text with the protected text already swapped in.
+        let spoken = protected?.swappingIn(transcript) ?? transcript
+        let request = CleanupRequest(rawTranscript: transcript, dictionary: terms.map(\.text), targetContext: context, protectedTokens: protected?.tokens ?? [])
         let backend: any CleanupBackend = settings.usesModelCleanup ? cleanup : rawBackend
-        let stream = Self.markingFirstToken(backend.clean(request), clock: clock, now: now)
+        let source: AsyncThrowingStream<String, Error> = switch protected {
+        case nil: backend.clean(request)
+        case let protected? where protected.isOnlyProtected: protected.verbatim()
+        case let protected?: protected.guarding(backend.clean(request))
+        }
+        let stream = Self.markingFirstToken(source, clock: clock, now: now)
+        let verbatim = protected != nil
 
         let delivery: Delivery
         // DS-06: no target app, or focus moved off the press-time app before release -> clipboard
         if focusMoved || !context.hasEditableTarget {
             let reason: DegradedReason = context.accessibilityGranted ? .copiedNoTarget : .copiedNoAX
-            delivery = await deliverToClipboard(rawTranscript: transcript, reason: reason, stream: stream, clock: clock)
+            delivery = await deliverToClipboard(rawTranscript: spoken, reason: reason, stream: stream, verbatim: verbatim, clock: clock)
         } else if context.isTerminalClass || context.elementToken != nil {
-            delivery = await deliverLive(rawTranscript: transcript, context: context, overrides: settings.injectionOverrides, stream: stream, clock: clock)
+            delivery = await deliverLive(rawTranscript: spoken, context: context, overrides: settings.injectionOverrides, stream: stream, verbatim: verbatim, clock: clock)
         } else { // DS-06b: an app but no focused element (browser, canvas, Finder): one paste that
             // leaves the transcript on the clipboard; never unicode-type into an unknown focus
-            delivery = await deliverPasteAndKeep(rawTranscript: transcript, context: context, stream: stream, clock: clock)
+            delivery = await deliverPasteAndKeep(rawTranscript: spoken, context: context, stream: stream, verbatim: verbatim, clock: clock)
         }
         emit(.idle)
         let end = now()
         onTiming(clock.report(end: end, words: rawTranscript.split(whereSeparator: \.isWhitespace).count))
         if wantsRecord {
-            await recordIfAllowed(delivery, rawTranscript: rawTranscript, context: release, pressApp: pressApp, settings: settings, clock: clock, end: end)
+            await recordIfAllowed(delivery, protected: protected, rawTranscript: rawTranscript, context: release, pressApp: pressApp, settings: settings, clock: clock, end: end)
         }
         return nil
     }
@@ -591,19 +608,23 @@ public actor DictationSession {
     /// row. A secure field never records, whatever the gate says: the release probe, then a second
     /// one so a field that turned secure during cleanup counts too (HI-24). That one runs only when
     /// the rest passed, and is cheap (same element, short timeout) because it holds `injectionLock`.
-    private func recordIfAllowed(_ delivery: Delivery, rawTranscript: String, context: TargetContext, pressApp: String?, settings: Settings, clock: UtteranceClock, end: ContinuousClock.Instant) async {
+    private func recordIfAllowed(_ delivery: Delivery, protected: ProtectedText?, rawTranscript: String, context: TargetContext, pressApp: String?, settings: Settings, clock: UtteranceClock, end: ContinuousClock.Instant) async {
         guard !context.isSecureInput,
               history.shouldRecord(context: context, pressApp: pressApp, settings: settings),
               !(await contextProvider.isSecureNow(context))
         else { return }
         let t = clock.rowTimings(end: end)
-        let record = DictationRecord(
+        var record = DictationRecord(
             startedAt: clock.startedAt, heldMs: t.held, bundleID: pressApp,
             delivery: delivery.strategy, degraded: delivery.degraded,
             backend: settings.usesModelCleanup ? cleanupLabel : "raw",
             rawText: rawTranscript, cleanText: delivery.landedText,
             sttMs: t.stt, cleanupMs: t.cleanup, landedMs: t.landed
         )
+        if let protected {  // protected text counts as the words that were spoken, and the row says it held some
+            record.words = protected.spokenWordCount(inLanded: delivery.landedText)
+            record.protectedSpans = protected.tokens.count
+        }
         lastInjection?.recordID = record.id  // every delivery path sets or clears lastInjection
         history.record(record)
     }
@@ -627,7 +648,8 @@ public actor DictationSession {
         }
     }
 
-    private func deliverLive(rawTranscript: String, context: TargetContext, overrides: [String: InjectionStrategy], stream: AsyncThrowingStream<String, Error>, clock: UtteranceClock) async -> Delivery {
+    /// `verbatim`: the stream carries protected text, whose line ends are kept byte for byte (it was trimmed before the swap).
+    private func deliverLive(rawTranscript: String, context: TargetContext, overrides: [String: InjectionStrategy], stream: AsyncThrowingStream<String, Error>, verbatim: Bool, clock: UtteranceClock) async -> Delivery {
         emit(.cleaning)
         var typed = ""
         var written = Written(kind: DeliveryKind(injectionPolicy.strategy(for: context, overrides: overrides)))
@@ -646,7 +668,7 @@ public actor DictationSession {
                         continue
                     }
                     emit(.injecting)
-                    let tidy = InjectionText.trimLineEnds(text)
+                    let tidy = verbatim ? text : InjectionText.trimLineEnds(text)
                     let sanitized = context.isTerminalClass ? InjectionText.sanitizeForTerminal(tidy) : tidy
                     let (outcome, used) = await injectWithFallback(sanitized, to: context, overrides: overrides)
                     switch outcome {
@@ -727,7 +749,7 @@ public actor DictationSession {
 
     /// Collects the whole stream for one-shot delivery, repairing it with raw text on failure.
     /// `fellBack` is true when raw text had to stand in for (part of) the cleanup.
-    private func collect(_ stream: AsyncThrowingStream<String, Error>, rawTranscript: String) async -> (text: String, fellBack: Bool) {
+    private func collect(_ stream: AsyncThrowingStream<String, Error>, rawTranscript: String, verbatim: Bool) async -> (text: String, fellBack: Bool) {
         var text = ""
         var stalled = false
         do {
@@ -746,12 +768,12 @@ public actor DictationSession {
         }
         if stalled { return (text + RawRemainder.after(produced: text, raw: rawTranscript), true) }
         if text.allSatisfy(\.isWhitespace) { return (rawTranscript, true) } // LB-05
-        return (InjectionText.trimLineEnds(text), false)
+        return (verbatim ? text : InjectionText.trimLineEnds(text), false)
     }
 
-    private func deliverPasteAndKeep(rawTranscript: String, context: TargetContext, stream: AsyncThrowingStream<String, Error>, clock: UtteranceClock) async -> Delivery {
+    private func deliverPasteAndKeep(rawTranscript: String, context: TargetContext, stream: AsyncThrowingStream<String, Error>, verbatim: Bool, clock: UtteranceClock) async -> Delivery {
         emit(.cleaning)
-        let (text, _) = await collect(stream, rawTranscript: rawTranscript)
+        let (text, _) = await collect(stream, rawTranscript: rawTranscript, verbatim: verbatim)
         lastInjection = nil // no element to guard a ⌘Z against
         let reason: DegradedReason = context.accessibilityGranted ? .copiedNoTarget : .copiedNoAX
         // A host chain without paste gets the clipboard alone, as without Accessibility.
@@ -767,10 +789,10 @@ public actor DictationSession {
         return Delivery(landedText: text, strategy: .paste, degraded: reason)
     }
 
-    private func deliverToClipboard(rawTranscript: String, reason: DegradedReason, stream: AsyncThrowingStream<String, Error>, clock: UtteranceClock) async -> Delivery {
+    private func deliverToClipboard(rawTranscript: String, reason: DegradedReason, stream: AsyncThrowingStream<String, Error>, verbatim: Bool, clock: UtteranceClock) async -> Delivery {
         lastInjection = nil // nothing typed this time, so an older injection is no longer "the last"
         emit(.cleaning)
-        let (text, fellBack) = await collect(stream, rawTranscript: rawTranscript)
+        let (text, fellBack) = await collect(stream, rawTranscript: rawTranscript, verbatim: verbatim)
         await clipboard.copy(text)
         clock.markLanded(now())
         let degraded: DegradedReason = fellBack ? .rawTyped : reason

@@ -60,7 +60,9 @@ class SessionTestCase: XCTestCase {
         maxCommandRecordingDuration: Duration = .seconds(15),
         commandSleep: Deadline.Sleeper? = nil,
         divertSink: (any UtteranceSink)? = nil,
-        maxDivertedDuration: Duration = .seconds(180)
+        maxDivertedDuration: Duration = .seconds(180),
+        protectedPhrases: [ProtectedPhrase] = [],
+        protectedSource: (@Sendable () async -> [ProtectedPhrase])? = nil
     ) -> Harness {
         let commandInputs = CommandBox(initialInputs)
         let catalog = CommandBox(initialCatalog)
@@ -100,7 +102,8 @@ class SessionTestCase: XCTestCase {
             commandSleep: commandSleep ?? { await clock.sleep($0) },
             maxCommandRecordingDuration: maxCommandRecordingDuration,
             divertSink: divertSink,
-            maxDivertedDuration: maxDivertedDuration
+            maxDivertedDuration: maxDivertedDuration,
+            protectedPhrases: protectedSource ?? { protectedPhrases }
         )
         return Harness(session: session, hotkey: hotkey, audio: audio, transcriber: transcriber, ax: ax, paste: paste, unicode: unicode, context: context, settings: settings, clipboard: clipboard, undo: undo, clock: clock, executor: executor, commandInputs: commandInputs, catalog: catalog)
     }
