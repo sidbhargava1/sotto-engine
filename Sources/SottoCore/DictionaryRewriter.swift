@@ -25,7 +25,7 @@ extension DictionaryTerm {
 
 public enum DictionaryRewriter {
     /// One left-to-right pass: at each position the longest variant wins, and replaced text is
-    /// never re-scanned. Matches are whole words, case-insensitive, any whitespace between words.
+    /// never re-scanned. Matches are whole words, case-insensitive; see `pattern` for what may sit between words.
     public static func rewrite(_ transcript: String, terms: [DictionaryTerm]) -> String {
         guard let (rules, regex) = compiled(terms) else { return transcript }
 
@@ -77,8 +77,10 @@ public enum DictionaryRewriter {
             .filter { seen.insert($0.variant.lowercased()).inserted }
     }
 
+    /// STT inserts pause commas and dashes inside a variant ("fleet, view"), so those match between
+    /// words. Sentence-ending punctuation still splits ("a fleet. View it" is two sentences).
     private static func pattern(for variant: String) -> String {
         let words = variant.split(separator: " ").map { NSRegularExpression.escapedPattern(for: String($0)) }
-        return #"(?<![\p{L}\p{N}\p{M}_])"# + words.joined(separator: #"\s+"#) + #"(?![\p{L}\p{N}\p{M}_])"#
+        return #"(?<![\p{L}\p{N}\p{M}_])"# + words.joined(separator: #"[\s,–—-]+"#) + #"(?![\p{L}\p{N}\p{M}_])"#
     }
 }
