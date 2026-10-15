@@ -117,6 +117,17 @@ final class ProtectedSessionTests: SessionTestCase {
         XCTAssertEqual(injected, "sure https://cal.com/me")
     }
 
+    func test_PS08b_theOutputCapFallsBackToRawUnderProtection() async {
+        let backend = FixtureBackend(steps: [.init("Sure ")], ending: .fail(CleanupError.outputCapReached))
+        let h = harness("sure my calendar link", backend: backend)
+        let states = await collectStates(h)
+        await runUtterance(h)
+        let injected = await h.ax.injectedText()
+        XCTAssertEqual(injected, "sure https://cal.com/me", "a cut-off answer can't carry the placeholder: raw with the text in")
+        let settled = await states.settled()
+        XCTAssertTrue(settled.contains(.degraded(.rawTyped)), "\(settled)")
+    }
+
     func test_PS09_aStalledModelFallsBackToo() async {
         let backend = FixtureBackend(steps: [.init("never", after: .seconds(5))])
         let h = makeHarness(
@@ -153,6 +164,7 @@ final class ProtectedSessionTests: SessionTestCase {
         XCTAssertEqual(history.records.first?.rawText, "send my calendar link")
         XCTAssertEqual(history.records.first?.cleanText, "send https://cal.com/me")
         XCTAssertEqual(history.records.first?.words, 4, "the words that were spoken, not the inserted text")
+        XCTAssertEqual(history.records.first?.protectedSpans, 1)
     }
 
     func test_PS14_aLongTemplateDoesNotInflateTheWordCount() async {

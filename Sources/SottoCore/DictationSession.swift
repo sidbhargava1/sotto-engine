@@ -565,9 +565,10 @@ public actor DictationSession {
         // Raw fallbacks use the rewritten text too: RawRemainder aligns against what cleanup saw.
         // Protected phrases first, on what was said: a heard-as variant must not eat part of one, and
         // the dictionary never sees a placeholder. The model sees placeholders only.
-        let protected = ProtectedText(rawTranscript, phrases: await protectedPhrases())?.mappingText { DictionaryRewriter.rewrite($0, terms: terms) }
+        let matched = ProtectedText(rawTranscript, phrases: await protectedPhrases())
+        let protected = matched?.mappingText { DictionaryRewriter.rewrite($0, terms: terms) }
         let transcript = protected?.masked ?? DictionaryRewriter.rewrite(rawTranscript, terms: terms)
-        if transcript != (protected?.masked ?? rawTranscript) { log.info("dictionary: heard-as rewrite applied") }
+        if transcript != (matched?.masked ?? rawTranscript) { log.info("dictionary: heard-as rewrite applied") }
         if let protected { log.info("protected: \(protected.tokens.count, privacy: .public) spans, cleanup \(protected.isOnlyProtected ? "skipped" : "guarded", privacy: .public)") }
         // Raw fallbacks and RawRemainder use the text with the protected text already swapped in.
         let spoken = protected?.swappingIn(transcript) ?? transcript
@@ -596,7 +597,7 @@ public actor DictationSession {
         let end = now()
         onTiming(clock.report(end: end, words: rawTranscript.split(whereSeparator: \.isWhitespace).count))
         if wantsRecord {
-            await recordIfAllowed(delivery, words: protected?.spokenWordCount(inLanded: delivery.landedText), rawTranscript: rawTranscript, context: release, pressApp: pressApp, settings: settings, clock: clock, end: end)
+            await recordIfAllowed(delivery, protected: protected, rawTranscript: rawTranscript, context: release, pressApp: pressApp, settings: settings, clock: clock, end: end)
         }
         return nil
     }
@@ -607,7 +608,7 @@ public actor DictationSession {
     /// row. A secure field never records, whatever the gate says: the release probe, then a second
     /// one so a field that turned secure during cleanup counts too (HI-24). That one runs only when
     /// the rest passed, and is cheap (same element, short timeout) because it holds `injectionLock`.
-    private func recordIfAllowed(_ delivery: Delivery, words: Int?, rawTranscript: String, context: TargetContext, pressApp: String?, settings: Settings, clock: UtteranceClock, end: ContinuousClock.Instant) async {
+    private func recordIfAllowed(_ delivery: Delivery, protected: ProtectedText?, rawTranscript: String, context: TargetContext, pressApp: String?, settings: Settings, clock: UtteranceClock, end: ContinuousClock.Instant) async {
         guard !context.isSecureInput,
               history.shouldRecord(context: context, pressApp: pressApp, settings: settings),
               !(await contextProvider.isSecureNow(context))
@@ -620,7 +621,10 @@ public actor DictationSession {
             rawText: rawTranscript, cleanText: delivery.landedText,
             sttMs: t.stt, cleanupMs: t.cleanup, landedMs: t.landed
         )
-        if let words { record.words = words }  // protected text counts as the words that were spoken
+        if let protected {  // protected text counts as the words that were spoken, and the row says it held some
+            record.words = protected.spokenWordCount(inLanded: delivery.landedText)
+            record.protectedSpans = protected.tokens.count
+        }
         lastInjection?.recordID = record.id  // every delivery path sets or clears lastInjection
         history.record(record)
     }

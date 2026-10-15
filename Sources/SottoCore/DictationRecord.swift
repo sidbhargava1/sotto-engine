@@ -40,6 +40,9 @@ public struct DictationRecord: Sendable, Equatable {
     public var sttMs: Int
     public var cleanupMs: Int
     public var landedMs: Int
+    /// How many protected phrases (`ProtectedText`) this dictation's text carried; 0 for an ordinary one.
+    /// A host can treat such a row's `cleanText` as text the speaker did not say.
+    public var protectedSpans = 0
 
     public init(id: UUID = UUID(), startedAt: Date, heldMs: Int, bundleID: String?, delivery: DeliveryKind, degraded: DegradedReason?, backend: String, rawText: String, cleanText: String, sttMs: Int, cleanupMs: Int, landedMs: Int) {
         self.id = id

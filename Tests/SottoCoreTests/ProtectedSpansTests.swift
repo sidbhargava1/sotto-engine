@@ -91,6 +91,13 @@ final class ProtectedSpansTests: XCTestCase {
         XCTAssertEqual(p.swappingIn(p.masked), "um https://cal.com/me thanks")
     }
 
+    func test_swappingInNeverRescansInsertedText() throws {
+        let phrases = [ProtectedPhrase(spoken: "first one", text: "A mentions ⟦2⟧ literally"), ProtectedPhrase(spoken: "second one", text: "B")]
+        let p = try XCTUnwrap(ProtectedText("first one then second one", phrases: phrases))
+        XCTAssertEqual(p.swappingIn(p.masked), "A mentions ⟦2⟧ literally then B")
+        XCTAssertEqual(p.swappingIn("⟦9⟧ and ⟦1"), "⟦9⟧ and ⟦1", "unknown and unterminated runs stay")
+    }
+
     // MARK: only the protected text
 
     func test_isOnlyProtected() throws {

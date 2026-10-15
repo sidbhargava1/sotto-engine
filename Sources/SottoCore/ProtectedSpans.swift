@@ -104,15 +104,24 @@ public struct ProtectedText: Sendable, Equatable {
     /// `masked` (or any text derived from it) with the placeholders swapped in, unchecked: the
     /// raw fallback. Placeholders that are missing are simply absent.
     public func swappingIn(_ text: String) -> String {
-        tokens.reduce(into: text) { result, token in
-            if let replacement = texts[token] { result = result.replacingOccurrences(of: token, with: replacement) }
+        // One left-to-right pass like `restoring`, so inserted text that happens to contain another
+        // placeholder is never re-scanned. Unknown or unterminated runs stay as they are.
+        var out = ""
+        var rest = Substring(text)
+        while let start = rest.firstIndex(of: Self.open) {
+            out += rest[..<start]
+            guard let end = rest[start...].firstIndex(of: Self.close) else { rest = rest[start...]; break }
+            let token = String(rest[start...end])
+            out += texts[token] ?? token
+            rest = rest[rest.index(after: end)...]
         }
+        return out + rest
     }
 
     /// Words the speaker said in an utterance that landed as `landed`: the landed words, with each
     /// placeholder's text counted as the phrase that was spoken for it. Stats count speech, so a
     /// long inserted text does not inflate them.
-    public func spokenWordCount(inLanded landed: String) -> Int {
+    func spokenWordCount(inLanded landed: String) -> Int {
         let inserted = tokens.reduce(0) { $0 + DictationRecord.wordCount(texts[$1] ?? "") }
         let said = tokens.reduce(0) { $0 + DictationRecord.wordCount(spoken[$1] ?? "") }
         return max(0, DictationRecord.wordCount(landed) - inserted + said)
@@ -128,7 +137,7 @@ public struct ProtectedText: Sendable, Equatable {
     }
 
     /// What `isOnlyProtected` text lands as: the placeholders in order, one space apart.
-    public var onlyText: String { tokens.joined(separator: " ") }
+    var onlyText: String { tokens.joined(separator: " ") }
 
     private static let hesitations: Set<String> = ["um", "umm", "uh", "uhh", "er", "erm", "ah", "hm", "hmm", "mm", "mmm"]
 

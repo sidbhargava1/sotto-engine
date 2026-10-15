@@ -227,9 +227,11 @@ let session = DictationSession(/* capture, ... */, protectedPhrases: {
 - Phrases are matched on the raw transcript before the dictionary rewrite: whole words, any case, any run of whitespace or STT punctuation between words, longest phrase first. Each hit becomes an opaque placeholder (`⟦1⟧`); the dictionary rewrite and the model see only that.
 - `CleanupRequest.protectedTokens` lists the placeholders, and the prompt tail (never the cached prefix) asks the model to copy each one exactly once. A custom `CleanupBackend` must do the same.
 - The text is swapped in after cleanup and line-end trimming, so it lands byte for byte. Terminal-class targets still get newlines as spaces.
+- A self-correction across two placeholders ("send ⟦1⟧ no wait ⟦2⟧") normally ends in the raw fallback below, with both texts.
 - If a placeholder is dropped, repeated or invented, or the model fails or stalls, the session types the raw transcript with the text swapped in and reports `.degraded(.rawTyped)`.
-- If nothing but placeholders and hesitation sounds ("um", "uh") was said, cleanup is skipped and the text lands as written.
+- If nothing but placeholders and hesitation sounds was said (an English list: um, uh, er, ah, hm and their stretched forms), cleanup is skipped and the text lands as written.
 - History's raw text keeps what was said; the clean text keeps what landed. The record's `words` and `UtteranceTiming.words` count the words that were spoken, not the inserted text.
+- `DictationRecord.protectedSpans` is how many placeholders the dictation carried (0 for an ordinary one), so a host can tell a row holds text the speaker did not say.
 - `ProtectedText` is the pure piece underneath, usable without a session.
 
 ## Copy-ahead decoding
